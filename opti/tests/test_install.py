@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -150,6 +151,48 @@ class InstallTest(unittest.TestCase):
         with self.assertRaises(self.i.Error):
             self.i.set_dll(self.umu, "dxgi")  # not installed
         self.assertFalse(self.umu.exists())
+
+
+class LaunchOptionsTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        b = load_backend()
+        cls.i, cls.libs = submodule(b, "install"), submodule(b, "steamlibs")
+
+    def test_the_line_is_found_among_others(self):
+        has = self.i.in_launch_options
+        self.assertTrue(has("WINE_OPTISCALER_NAME=dxgi.dll %command%", "dxgi"))
+        self.assertTrue(has("WINE_OPTISCALER_NAME=dxgi.dll MAKO_PROFILE='x' ~/mako-launch %command% --skip", "dxgi"))
+        self.assertTrue(has('PROTON_LOG=1 WINE_OPTISCALER_NAME="DXGI.DLL" gamemoderun %command%', "dxgi"))
+        for options in ("", "%command%", "WINE_OPTISCALER_NAME=dxgi.dll", "%command% WINE_OPTISCALER_NAME=dxgi.dll",
+                        "WINE_OPTISCALER_NAME=d3d12.dll %command%", "XWINE_OPTISCALER_NAME=dxgi.dll %command%",
+                        "WINE_OPTISCALER_NAME=dxgi.dll.bak %command%", None):
+            self.assertFalse(has(options, "dxgi"), options)
+
+    def test_launch_options_from_steams_files(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        config = tmp / "userdata/1/config"
+        config.mkdir(parents=True)
+
+        def entry(appid, options):  # one shortcut, binary VDF
+            return (b"\x00" + b"0\x00" + b"\x02appid\x00" + struct.pack("<i", appid) +
+                    b"\x01LaunchOptions\x00" + options.encode() + b"\x00" + b"\x08")
+        (config / "shortcuts.vdf").write_bytes(b"\x00shortcuts\x00" + entry(-399969654, "A=1 %command%") + b"\x08\x08")
+        (config / "localconfig.vdf").write_text(
+            '"UserLocalConfigStore" { "Software" { "Valve" { "Steam" { "apps" {'
+            ' "100" { "LaunchOptions" "WINE_OPTISCALER_NAME=dxgi.dll %command%" } "200" { "Playtime" "5" } } } } } }')
+        self.assertEqual(self.libs.launch_options(str(-399969654 & 0xFFFFFFFF), tmp), "A=1 %command%")
+        self.assertEqual(self.libs.launch_options("100", tmp), "WINE_OPTISCALER_NAME=dxgi.dll %command%")
+        self.assertEqual(self.libs.launch_options("200", tmp), "")  # known, without options
+        self.assertIsNone(self.libs.launch_options("300", tmp))
+        (config / "localconfig.vdf").write_text('{ "x" "y" } "UserLocalConfigStore" { "Software" { "Valve" { "Steam" { "apps" {'
+                                                ' "100" { "LaunchOptions" "WINE_OPTISCALER_NAME=dxgi.dll %command%" } } } } } }')
+        self.assertEqual(self.libs.launch_options("100", tmp), "WINE_OPTISCALER_NAME=dxgi.dll %command%")  # a nameless block
+        # Files Steam didn't write: nothing to tell, never an error.
+        for junk in (b"\x01shortcuts\x00text\x00\x08", b"\x00a\x00" * 5000, b"\xff"):
+            (config / "shortcuts.vdf").write_bytes(junk)
+            self.assertEqual(self.libs.launch_options("100", tmp), "WINE_OPTISCALER_NAME=dxgi.dll %command%")
 
 
 class GameInstallTest(unittest.TestCase):

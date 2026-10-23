@@ -7,6 +7,7 @@ copy of it). OptiScaler is installed when OptiScaler.dll is there, also when som
 """
 import filecmp
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -16,6 +17,14 @@ from .nightly import MAIN_DLL, MARKER, read_marker
 DLL_NAMES = ("dxgi", "d3d12", "dbghelp", "winmm")
 INI = "OptiScaler.ini"
 FOLDER = "OptiScaler"  # OptiScaler's own folder, next to OptiScaler.dll
+
+
+def in_launch_options(options, dll):
+    """True if launch options (as Steam keeps them) load OptiScaler as <dll>.dll: WINE_OPTISCALER_NAME=<dll>.dll
+    as a word of its own (quoted or not) before %command%, whatever else is around."""
+    m = re.search(r"(?:^|\s)WINE_OPTISCALER_NAME=([\"']?)(?i:" + re.escape(dll) + r"\.dll)\1(?=\s|$)", options or "")
+    command = (options or "").find("%command%")
+    return m is not None and command > m.start()
 
 
 def _check_dll(dll):

@@ -168,19 +168,40 @@ def _set_in_file(path, section, key, value, mtime):
 # ---------- The selected game ----------
 
 def load(appid):
-    """The game's file, as _load_file, or state "no_prefix" if the game has no Proton prefix; plus
-    "install" (install.state of its umu folder with the custom slots it has on as "extras"; None without
-    a prefix), "build" (the nightly Global has downloaded, as nightly.read_marker, or None) and "custom"
-    ({slot: kept in Global})."""
+    """The game's file, as _load_file (each key with "default": OptiScaler's own value for it, or None), or
+    state "no_prefix" if the game has no Proton prefix. Plus:
+    - "install": install.state of its umu folder, with "extras" (the custom slots it has on) and "launch_ok"
+      (whether its launch options load OptiScaler as that DLL; None when there's nothing to tell); None
+      without a prefix;
+    - "build": the nightly Global has downloaded (nightly.read_marker), or None;
+    - "custom": {slot: kept in Global}."""
+    appid = _appid(appid)
     path = _ini_path(appid)
     if path is None:
         r = {"state": "no_prefix", "path": None, "mtime": None, "sections": [], "install": None}
     else:
         r = _load_file(path)
+        defaults = _optiscaler_defaults()
+        for sec in r["sections"]:
+            for k in sec["keys"]:
+                k["default"] = defaults.get((sec["name"], k["key"]))  # None: OptiScaler's file hasn't the key
         r["install"] = {**install.state(path.parent), "extras": custom.game_state(path.parent)}
+        dll, options = r["install"]["dll"], steamlibs.launch_options(appid)
+        # Whether the launch options load OptiScaler as that DLL; None when there's nothing to tell.
+        r["install"]["launch_ok"] = install.in_launch_options(options, dll) if dll and options is not None else None
     r["build"] = nightly.read_marker(_nightly_dir())
     r["custom"] = {slot: kept is not None for slot, kept in custom.status(_custom_dir()).items()}
     return r
+
+
+def _optiscaler_defaults():
+    """{(section, key): value} of OptiScaler's own file: the downloaded build's, else the one in assets."""
+    built = _nightly_dir() / install.INI
+    try:
+        text, _, _ = _read(built if built.is_file() else DEFAULTS["optiscaler"])
+    except ctx.Unavailable:
+        return {}
+    return {(s["name"], k["key"]): k["value"] for s in ini.parse(text) for k in s["keys"]}
 
 
 def set_value(appid, section, key, value, mtime):

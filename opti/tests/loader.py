@@ -34,11 +34,16 @@ class Unavailable(RuntimeError):
     pass
 
 
+_log = logging.getLogger("opti-test")
+_log.propagate = False  # what the backend logs isn't the tests' output
+_log.addHandler(logging.NullHandler())
+
+
 class FakeCtx:
     """What the backend uses of the core's ctx in these tests."""
     InvalidArgument = InvalidArgument
     Unavailable = Unavailable
-    log = logging.getLogger("opti-test")
+    log = _log
 
     def task(self, label):
         raise Unavailable("no Tasks panel in the tests")  # the backend's plan B
