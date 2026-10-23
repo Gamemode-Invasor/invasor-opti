@@ -1,0 +1,15 @@
+# Build output and caches
+dist/
+__pycache__/
+*.py[cod]
+*.zip
+
+# Local editor/tool files
+.claude/
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+AGENTS.md
+CLAUDE.md

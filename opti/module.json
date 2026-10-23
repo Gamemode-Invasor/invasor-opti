@@ -1,0 +1,10 @@
+{
+  "api": 1,
+  "min_core": "0.2.0",
+  "name": "OptiScaler",
+  "version": "0.1.0",
+  "author": "FranjeGueje",
+  "description": "OptiScaler from the panel: get the latest nightly, install it in the selected game with your FSR 4 driver DLLs or HelixSR, and edit any OptiScaler.ini, every option with its description.",
+  "order": 45,
+  "tab": "Opti"
+}

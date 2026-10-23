@@ -1,0 +1,18 @@
+name: CI
+
+# Tests the module against the core's current main, on every push and pull request, and every
+# Monday: that way a change in the core that breaks this module shows up within a week.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  module:
+    uses: Gamemode-Invasor/invasor/.github/workflows/module.yml@main
+    secrets: inherit
