@@ -5,7 +5,8 @@ import { currentGame, defineModule, ui, type ModuleCtx, type WindowHandle, type 
 // launch line to copy. Global: the module's own, the one a game gets, with two resets, under the
 // OptiScaler nightly the module has downloaded (and a button to get the latest) and the custom DLLs.
 // Credits last.
-// Everything sits in a folded "Configuration" group, then one foldable group per [Section]
+// Everything sits in a folded "All Configuration" group (in Game, a switch hides the keys still at OptiScaler's
+// defaults), then one foldable group per [Section]
 // (X folds the one under the cursor), one control per key: a list when the comments above
 // the key name its values, else a text field. Y shows the key's description (the comments)
 // under it. Every change is written at once.
@@ -16,6 +17,7 @@ interface Key {
   kind: "select" | "text";
   options: { value: string; label: string }[];
   description: string;
+  default?: string | null; // Game only: OptiScaler's own value for the key (null: its file hasn't the key)
 }
 
 interface Loaded {
@@ -66,6 +68,7 @@ interface Install {
   version: Build | null;
   dll: string | null;
   extras?: Record<string, boolean>;
+  launch_ok?: boolean | null; // the game's launch options load it as `dll` (null: nothing to tell)
 }
 
 interface Build {
@@ -172,6 +175,17 @@ function openBrowser(ctx: ModuleCtx, title: string, onPick: (path: string) => vo
   browser = ctx.openWindow(spec);
 }
 
+/** What the "Hide default values" switch hides: a key's control, and whether its value is OptiScaler's own. */
+interface Filterable {
+  el: HTMLElement;
+  isDefault: boolean;
+}
+
+/** True if value is OptiScaler's own for the key (ini values aren't case-sensitive). */
+function isDefault(def: string | null | undefined, value: string) {
+  return def != null && value.toLowerCase() === def.toLowerCase();
+}
+
 /** A foldable group that tells `remember` whether the user left it open (kept while the panel lives). */
 function foldable(title: string, children: HTMLElement[], open: boolean, remember: (open: boolean) => void) {
   const el = ui.section(title, children, { open });
@@ -197,6 +211,10 @@ class IniPage {
   private writes: Promise<void> = Promise.resolve();
   private openSections = new Set<string>();
   private configOpen = false;
+  private hideDefaults = false;
+  // What the "Hide default values" switch hides or shows, from the last build of the page.
+  private filterable: { section: HTMLElement; keys: Filterable[] }[] = [];
+  private allDefault: HTMLElement | null = null;
 
   constructor(
     private load: (ctx: ModuleCtx) => Promise<Loaded>,
@@ -209,6 +227,7 @@ class IniPage {
     this.shown = null;
     this.openSections.clear();
     this.configOpen = false;
+    this.hideDefaults = false;
   }
 
   /** False when the page already shows `sig` (nothing to rebuild: the focus ring stays put). */
@@ -243,22 +262,62 @@ class IniPage {
     this.sig = this.sigFor(key, loaded, null);
   }
 
-  /** "Configuration" with every [Section] of the file. */
+  /** "All Configuration" with every [Section] of the file. */
   configuration(ctx: ModuleCtx, loaded: Loaded, key: unknown, extra: Record<string, unknown>, rerender: () => void): HTMLElement[] {
     const parts: HTMLElement[] = [];
     if (!loaded.sections.length) parts.push(ui.info("This file has no options (key=value lines)."));
+    this.filterable = [];
+    this.allDefault = ui.info("Every option has OptiScaler's default value.");
     const sections = loaded.sections.map((s) => this.section(ctx, s, key, extra, rerender));
-    parts.push(foldable("Configuration", sections, this.configOpen, (open) => void (this.configOpen = open)));
+    parts.push(foldable("All Configuration", [this.allDefault, ...sections], this.configOpen, (open) => void (this.configOpen = open)));
+    this.applyFilter();
     return parts;
+  }
+
+  /** The switch that hides the keys still at OptiScaler's default value (and the groups left empty). */
+  defaultsSwitch() {
+    return ui.toggle({
+      label: "Hide default values",
+      value: this.hideDefaults,
+      hint: "Show only the options changed from OptiScaler's defaults",
+      onChange: (on) => {
+        this.hideDefaults = on;
+        this.applyFilter();
+      },
+    });
+  }
+
+  private applyFilter() {
+    let shown = 0;
+    for (const s of this.filterable) {
+      let any = false;
+      for (const k of s.keys) {
+        const hide = this.hideDefaults && k.isDefault;
+        k.el.style.display = hide ? "none" : "";
+        any ||= !hide;
+      }
+      s.section.style.display = any ? "" : "none";
+      if (any) shown++;
+    }
+    if (this.allDefault) this.allDefault.style.display = this.hideDefaults && this.filterable.length && !shown ? "" : "none";
   }
 
   private section(ctx: ModuleCtx, s: Loaded["sections"][number], key: unknown, extra: Record<string, unknown>, rerender: () => void) {
     const title = s.name || "(no section)";
-    const keys = s.keys.map((k) => this.control(ctx, s.name, k, key, extra, rerender));
-    return foldable(title, keys, this.openSections.has(title), (open) => void (open ? this.openSections.add(title) : this.openSections.delete(title)));
+    const entries = s.keys.map((k) => {
+      // What's written counts the next time the switch is used: nothing vanishes under the cursor.
+      const el = this.control(ctx, s.name, k, key, extra, rerender, (value) => void (entry.isDefault = isDefault(k.default, value)));
+      const entry: Filterable = { el, isDefault: isDefault(k.default, k.value) };
+      return entry;
+    });
+    const keys = entries.map((e) => e.el);
+    const el = foldable(title, keys, this.openSections.has(title), (open) => void (open ? this.openSections.add(title) : this.openSections.delete(title)));
+    this.filterable.push({ section: el, keys: entries });
+    return el;
   }
 
-  private control(ctx: ModuleCtx, section: string, k: Key, pageKey: unknown, extra: Record<string, unknown>, rerender: () => void): HTMLElement {
+  /** One key's control; `written` gets every value written to the file. */
+  private control(ctx: ModuleCtx, section: string, k: Key, pageKey: unknown, extra: Record<string, unknown>, rerender: () => void, written: (value: string) => void): HTMLElement {
     let current = k.value;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let latest = 0; // only the newest change may put its result on screen
@@ -268,6 +327,7 @@ class IniPage {
         if (this.shown) this.shown.mtime = r.mtime;
         this.sig = this.sigFor(pageKey, this.shown, null); // our own write: no need to rebuild
         current = r.value;
+        written(r.value);
         undo(r.value); // shows what was written (e.g. an empty text is "auto")
       } catch (e) {
         undo(current);
@@ -336,13 +396,17 @@ async function renderGame(ctx: ModuleCtx, force = false) {
     parts.push(ui.info(loaded.state === "ok" ? shortPath(loaded.path) : `No OptiScaler.ini in ${shortPath(loaded.path)}`));
     parts.push(ui.separator(), ...installation(ctx, t.game.appid, loaded), ui.separator());
     if (loaded.state === "ok") {
-      parts.push(...game.configuration(ctx, loaded, t.game.appid, { appid: t.game.appid }, () => void renderGame(ctx, true)));
+      parts.push(game.defaultsSwitch(), ...game.configuration(ctx, loaded, t.game.appid, { appid: t.game.appid }, () => void renderGame(ctx, true)));
     }
   }
   el.replaceChildren(...parts);
 }
 
 const DLLS = ["dxgi", "d3d12", "dbghelp", "winmm"];
+/** The launch line after 🟢 when the game's launch options have it, 🔴 when not (nothing when unknown). */
+function launchLineText(line: string, ok: boolean | null) {
+  return ok === null ? line : `${ok ? "🟢" : "🔴"} ${line}`;
+}
 // The DLL picked for a game before installing, and whether "Installation" is open, while the panel lives.
 const chosenDll = new Map<string, string>();
 let installOpen = false;
@@ -357,13 +421,13 @@ function installation(ctx: ModuleCtx, key: unknown, loaded: Loaded): HTMLElement
   let line = inst.dll ? launchLine(inst.dll) : "";
   let lineInfo: HTMLElement | null = null; // on the page only while a DLL name loads OptiScaler
   if (inst.installed && inst.dll) {
-    lineInfo = ui.info(line);
+    lineInfo = ui.info(launchLineText(line, inst.launch_ok ?? null));
     parts.push(
       ui.info("The game's launch options need at least this line, and the game must run with GE-Proton or Proton-CachyOS:"),
       lineInfo,
       ui.button({
         label: "Copy",
-        hint: "Copy it, to paste in the game's launch options",
+        hint: "Copy it, to paste in the game's launch options (🟢 they have it, 🔴 they don't)",
         onClick: async () => ((await copyText(line)) ? ctx.toast("Copied") : ctx.toast("Couldn't copy it", "error")),
       }),
     );
@@ -409,7 +473,7 @@ function installation(ctx: ModuleCtx, key: unknown, loaded: Loaded): HTMLElement
       game.accept(key, r);
       current = dll;
       line = launchLine(dll);
-      if (lineInfo) lineInfo.textContent = line;
+      if (lineInfo) lineInfo.textContent = launchLineText(line, r.install?.launch_ok ?? null);
       else void renderGame(ctx, true); // the line wasn't on the page yet
     } catch (e) {
       select.set(current);

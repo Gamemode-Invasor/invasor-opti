@@ -6,5 +6,6 @@
   "author": "FranjeGueje",
   "description": "OptiScaler from the panel: get the latest nightly, install it in the selected game with your FSR 4 driver DLLs or HelixSR, and edit any OptiScaler.ini, every option with its description.",
   "order": 45,
-  "tab": "Opti"
+  "tab": "Opti",
+  "no_qam": true
 }

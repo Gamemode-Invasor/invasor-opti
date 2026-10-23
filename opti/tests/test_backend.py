@@ -34,6 +34,14 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(len(r["sections"]), 37)
         self.assertIsInstance(r["mtime"], str)
 
+    def test_each_key_says_its_default(self):
+        path = self.prefix() / "OptiScaler.ini"
+        shutil.copy(HERE / "assets" / "OptiScaler.invasor.ini", path)
+        keys = {(s["name"], k["key"]): k for s in self.b.load("123")["sections"] for k in s["keys"]}
+        k = keys[("FSR", "UpscalerIndex")]
+        self.assertEqual((k["value"], k["default"]), ("0", "auto"))  # changed from OptiScaler's
+        self.assertEqual(keys[("FrameGen", "Enabled")]["default"], "auto")
+
     def test_bad_appid(self):
         with self.assertRaises(InvalidArgument):
             self.b.load("../etc")

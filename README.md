@@ -1,6 +1,6 @@
 # OptiScaler
 
-An [Invasor](https://github.com/Gamemode-Invasor/invasor) module for [OptiScaler](https://github.com/optiscaler/OptiScaler) from the panel: it downloads the latest nightly, installs it in the selected game (with your FSR 4 driver DLLs or HelixSR if you want), and edits any `OptiScaler.ini`. Three sub-tabs (L2/R2):
+An [Invasor](https://github.com/Gamemode-Invasor/invasor) module for [OptiScaler](https://github.com/optiscaler/OptiScaler) from the panel: it downloads the latest nightly, installs it in the selected game (with your FSR 4 driver DLLs or HelixSR if you want), and edits any `OptiScaler.ini`. It lives in the library's Invasor panel only, not in Quick Access: there's nothing to do with it during a game. Three sub-tabs (L2/R2):
 
 - **Game**: OptiScaler in the selected game, and its file.
 - **Global**: the module's own file, the one a game gets when OptiScaler is set up for it. It is kept in `~/.local/share/invasor-opti/OptiScaler.ini` (removed when the module is uninstalled with its data) and starts as a copy of `opti/assets/OptiScaler.invasor.ini`. Two buttons under it, in a folded **Reset config** group, replace it after asking: **Reset to OptiScaler defaults** (`opti/assets/OptiScaler.optiscaler.ini`, the file as OptiScaler v10.0.0-pre1, nightly 2026-10-23, ships it, GPL-3.0) and **Reset to invasor-opti defaults** (the file it started as).
@@ -18,7 +18,7 @@ The game's file is read from its Proton prefix, `compatdata/<appid>/pfx/drive_c/
 
 Under the file's path, the Game tab installs OptiScaler in that folder:
 
-- When OptiScaler is installed (there is an `OptiScaler.dll`, whoever put it there), the launch line, `WINE_OPTISCALER_NAME=dxgi.dll %command%`, with a **Copy** button. The game's launch options need at least that line, and the game must run with GE-Proton or Proton-CachyOS (the two with Wine's OptiScaler hack).
+- When OptiScaler is installed (there is an `OptiScaler.dll`, whoever put it there), the launch line, `WINE_OPTISCALER_NAME=dxgi.dll %command%`, with a **Copy** button, after 🟢 when the game's launch options have it (whatever else is around it) or 🔴 when they don't. Steam keeps a non-Steam shortcut's options in `shortcuts.vdf` at once, but a Steam game's in `localconfig.vdf` only from time to time, so right after changing them the mark may lag. The game's launch options need at least that line, and the game must run with GE-Proton or Proton-CachyOS (the two with Wine's OptiScaler hack).
 - A folded **Installation** group:
   - **Install OptiScaler** copies the build downloaded in Global: `OptiScaler.dll`, the `OptiScaler` folder and `.invasor-opti.version`, plus the Global `OptiScaler.ini` if the game has none (an existing one is kept). Then it links the chosen DLL name to `OptiScaler.dll`.
   - **Update to OptiScaler …** shows when Global has downloaded another build than the game's (or the game's was put there by hand): it copies the build's files over the game's (`OptiScaler.dll`, every file of the `OptiScaler` folder, `.invasor-opti.version`). Everything else stays: the game's `OptiScaler.ini`, its DLL name, its custom DLLs and anything you added to the folder. A DLL name that was a copy of `OptiScaler.dll` becomes a link to it.
@@ -28,8 +28,9 @@ Under the file's path, the Game tab installs OptiScaler in that folder:
 
 Each page is built from the file itself, so it follows whatever OptiScaler version is installed:
 
-- Everything sits in one **Configuration** group, folded, and inside it one group per `[Section]`, folded too. **X** folds or unfolds the group the cursor is in.
+- Everything sits in one **All Configuration** group, folded, and inside it one group per `[Section]`, folded too. **X** folds or unfolds the group the cursor is in.
 - One option per key, with its current value. When the comments above the key name its values (`true or false`, `0 = FSR 4.0.2 | 1 = FSR 3.1.5`, `0.0 - 1.0`, `xess, fsr21, ffx, dlss`) it is a list, with `auto` (OptiScaler's own default) first; otherwise it is a text field, where empty means `auto`.
+- In the Game tab, **Hide default values** (just above it) hides the options whose value is still OptiScaler's own (from the build downloaded in Global, else the file in `opti/assets/`), and the groups left empty: what's left is what was changed.
 - **Y** shows the key's description, the comments OptiScaler wrote above it.
 - Every change is written at once (a list once its value stays put for a moment, so going through it with ←→ doesn't write each value on the way). Only the line of that key changes: comments, order and line ends stay as they are. If another program changed the file meanwhile, nothing is written and the page reloads.
 
