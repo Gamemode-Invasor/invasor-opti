@@ -1,7 +1,9 @@
+import io
 import json
 import shutil
 import struct
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -196,3 +198,107 @@ class GameExtraTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HelixBuildTest(unittest.TestCase):
+    """backend: "Download and compile" runs bin/helixsr-fetch.sh and keeps what it builds in the helixsr slot."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.b = load_backend()
+        self.ctx = FakeCtx()
+        self.b.setup(self.ctx)
+        self.b.GLOBAL_DIR = self.tmp / "invasor-opti"
+        (self.tmp / "helixsr.dll").write_bytes(fake_dll())
+        self.addCleanup(self.b.teardown)
+
+    def script(self, body):
+        """A stand-in for helixsr-fetch.sh: $OUT is the --out folder."""
+        path = self.tmp / "fetch.sh"
+        path.write_text('while [ $# -gt 0 ]; do [ "$1" = --out ] && OUT=$2; shift; done\nmkdir -p "$OUT"\n' + body)
+        self.b.HELIXSR_SCRIPT = path
+
+    def wait(self):
+        self.b._helix_thread.join(10)
+        self.assertFalse(self.b._helix_thread.is_alive())
+        return self.b.helixsr_status()
+
+    def test_builds_into_the_slot(self):
+        # Its temporary files go under the build folder, removed with it.
+        self.script(f'echo "[helixsr-fetch] building..."\ncase "$TMPDIR" in "$(dirname "$OUT")"/tmp) ;; *) exit 3 ;; esac\n'
+                    f'mktemp -d >/dev/null\ncp "{self.tmp}/helixsr.dll" "$OUT/"\necho "[x]" > "$OUT/helixsr.ini"\n')
+        self.assertEqual(self.b.helixsr_build(), {"started": True, "busy": False})
+        self.assertEqual(self.wait(), {"busy": False, "error": None})
+        kept = self.b.custom_status()["helixsr"]
+        self.assertEqual([f["name"] for f in kept], ["helixsr.dll", "helixsr.ini"])
+        self.assertEqual(kept[0]["product"], "HelixSR")
+        self.assertEqual([p.name for p in self.b.GLOBAL_DIR.iterdir()], ["custom"])  # no build folder left
+
+    def test_a_failed_build_keeps_the_slot(self):
+        self.b.custom_set("helixsr", str(self.tmp / "helixsr.dll"))
+        self.script('echo "[helixsr-fetch] error: download failed: x" >&2\nexit 1\n')
+        self.b.helixsr_build()
+        self.assertEqual(self.wait(), {"busy": False, "error": "Build failed: download failed: x"})
+        self.assertIsNotNone(self.b.custom_status()["helixsr"])
+
+    def test_busy_then_teardown(self):
+        self.script("sleep 30\n")
+        self.assertTrue(self.b.helixsr_build()["started"])
+        self.assertEqual(self.b.helixsr_build(), {"started": False, "busy": True})
+        self.b.teardown()
+        self.assertFalse(self.b._helix_thread.is_alive())
+        self.assertEqual(self.b.helixsr_status(), {"busy": False, "error": "Build stopped"})
+
+    def test_not_while_a_game_runs(self):
+        self.script("exit 0\n")
+        self.ctx.game = types.SimpleNamespace(selected=None, running={"appid": "1"})
+        with self.assertRaises(Unavailable):
+            self.b.helixsr_build()
+
+
+class HelixCheckTest(unittest.TestCase):
+    """backend: helixsr_check compares the kept DLL with GitHub's latest stable tag (cached)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.b = load_backend()
+        self.b.setup(FakeCtx())
+        self.b.GLOBAL_DIR = self.tmp / "invasor-opti"
+        self.asked = 0
+        self.tag = "v2.0.0"
+        n = submodule(self.b, "nightly")
+
+        def open_url(url, timeout=30):
+            self.asked += 1
+            if self.tag is None:
+                raise n.Error("offline")
+            return io.BytesIO(json.dumps({"tag_name": self.tag}).encode())
+        n.open_url = open_url
+
+    def keep(self, version):
+        (self.tmp / "helixsr.dll").write_bytes(fake_dll(version=version))
+        self.b.custom_set("helixsr", str(self.tmp / "helixsr.dll"))
+
+    def test_nothing_kept(self):
+        self.assertEqual(self.b.helixsr_check(), {"installed": None, "latest": "v2.0.0", "update": False})
+
+    def test_up_to_date_and_older(self):
+        self.keep((2, 0, 0, 0))
+        self.assertEqual(self.b.helixsr_check(), {"installed": "2.0.0.0", "latest": "v2.0.0", "update": False})
+        self.b._latest_cache["at"] = 0.0  # the hour is over
+        self.tag = "v2.0.1"
+        self.assertTrue(self.b.helixsr_check()["update"])
+
+    def test_cached_and_offline(self):
+        self.keep((1, 9, 3, 0))
+        self.tag = None
+        self.assertEqual(self.b.helixsr_check(), {"installed": "1.9.3.0", "latest": None, "update": False})
+        self.tag = "v2.0.0"
+        self.b.helixsr_check()
+        self.assertEqual(self.asked, 1)  # a failed check waits before asking again
+        self.b._latest_cache["at"] = 0.0
+        self.assertTrue(self.b.helixsr_check()["update"])
+        self.b.helixsr_check()
+        self.assertEqual(self.asked, 2)

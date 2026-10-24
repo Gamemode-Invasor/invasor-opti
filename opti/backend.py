@@ -7,17 +7,24 @@ assets/OptiScaler.invasor.ini and can be reset to that or to OptiScaler's own
 (assets/OptiScaler.optiscaler.ini).
 
 Next to the Global file, NIGHTLY_NAME holds the latest OptiScaler nightly, downloaded on request
-in a thread of its own (see nightly.py), and CUSTOM_NAME the DLLs the user brings (see custom.py).
-install.py puts them in a game.
+in a thread of its own (see nightly.py), and CUSTOM_NAME the DLLs the user brings (see custom.py), or
+HelixSR built on this device by bin/helixsr-fetch.sh (also in a thread of its own). install.py puts them
+in a game.
 
 A file is the only source of truth: every call reads it again, and a change rewrites just the
 line of that key (comments, order and line ends stay as they are), atomically, and only if no
 other program saved the file since the UI read it.
 """
+import collections
+import json
 import os
+import re
 import shutil
+import signal
+import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from . import custom, files, ini, install, nightly, steamlibs
@@ -40,6 +47,18 @@ _stop = threading.Event()
 _last_error = None  # why the last download failed, for the UI
 _thread = None  # the download's, while it runs
 TEARDOWN_WAIT = 8  # of the core's 10 s for teardown
+# HelixSR's build: the script that downloads and builds it, and how long it may take.
+HELIXSR_SCRIPT = Path(__file__).resolve().parent / "bin" / "helixsr-fetch.sh"
+HELIXSR_TIMEOUT = 1800
+HELIXSR_RELEASE_API = "https://api.github.com/repos/lonewolf0622/HelixSR/releases/latest"  # the stable one
+HELIXSR_CHECK_TTL = 3600  # seconds a found tag is reused; a failed check is retried after HELIXSR_CHECK_RETRY
+HELIXSR_CHECK_RETRY = 120
+_latest_cache = {"at": 0.0, "ttl": 0, "tag": None}
+_latest_lock = threading.Lock()
+_helix = threading.Lock()  # held while a build runs
+_helix_error = None  # why the last build failed, for the UI
+_helix_thread = None  # the build's, while it runs
+_helix_proc = None  # the script, while it runs
 
 
 def setup(context):
@@ -407,12 +426,201 @@ def _download_job():
         _download.release()
 
 
+# ---------- HelixSR's build ----------
+
+# Lines of the script that move the task on: (start of the line, fraction, text).
+HELIXSR_STAGES = (
+    ("looking", 0.05, "Looking for the latest stable version"),
+    ("version:", 0.10, "Version found"),
+    ("downloading", 0.20, "Downloading"),
+    ("building", None, "Building (it can take a few minutes)"),
+)
+
+
+SAY = "[helixsr-fetch] "  # how the script's own lines start
+DIE = SAY + "error: "  # and the one it dies with
+
+
+def _helixsr_stage(line):
+    """(fraction, text) for a line of the script that starts a stage, else None."""
+    if not line.startswith(SAY):
+        return None
+    rest = line[len(SAY):]
+    for key, fraction, text in HELIXSR_STAGES:
+        if rest.startswith(key):
+            return fraction, text
+    return None
+
+
+def helixsr_status():
+    """{"busy", "error"}: whether a build runs, and why the last one failed (or None)."""
+    return {"busy": _helix.locked(), "error": _helix_error}
+
+
+def _helixsr_latest():
+    """Tag of the latest stable HelixSR release, or None (offline, rate limit, odd answer). Cached in memory."""
+    with _latest_lock:
+        cache = _latest_cache
+        if time.monotonic() - cache["at"] < cache["ttl"]:
+            return cache["tag"]
+        tag = None
+        try:
+            with nightly.open_url(HELIXSR_RELEASE_API, 8) as r:
+                tag = json.load(r).get("tag_name")
+            tag = tag if isinstance(tag, str) and tag else None
+        except (files.Error, OSError, ValueError, AttributeError) as e:
+            ctx.log.info("can't check the latest HelixSR: %s", e)
+        cache.update(at=time.monotonic(), ttl=HELIXSR_CHECK_TTL if tag else HELIXSR_CHECK_RETRY, tag=tag)
+        return tag
+
+
+def _version_key(version):
+    """(2, 0, 1) for "v2.0.1" or "2.0.1.0" (trailing zeros don't count); None without numbers."""
+    nums = [int(n) for n in re.findall(r"\d+", version or "")]
+    if not nums:
+        return None
+    while len(nums) > 1 and nums[-1] == 0:
+        nums.pop()
+    return tuple(nums)
+
+
+def helixsr_check():
+    """{"installed": the kept DLL's version (or None), "latest": the latest stable tag (None when unknown),
+    "update": the kept DLL is older}. Asks GitHub (cached), so it's apart from helixsr_status."""
+    kept = custom.status(_custom_dir())["helixsr"] or []
+    installed = next((f["version"] for f in kept if f["name"].endswith(".dll")), None)
+    latest = _helixsr_latest()
+    have, newest = _version_key(installed), _version_key(latest)
+    return {"installed": installed, "latest": latest, "update": have is not None and newest is not None and have < newest}
+
+
+def helixsr_build():
+    """Start downloading and building the latest stable HelixSR into the helixsr slot; {"started", "busy"}.
+    helixsr_status tells how it went."""
+    global _helix_thread
+    if not HELIXSR_SCRIPT.is_file():
+        raise ctx.Unavailable(f"build script not found: {HELIXSR_SCRIPT}")
+    # Heavy (download and build): not while a game is running.
+    if ctx.game.running:
+        raise ctx.Unavailable("a game is running: close it to build HelixSR")
+    if not _helix.acquire(blocking=False):
+        return {"started": False, "busy": True}
+    _stop.clear()
+    try:
+        _helix_thread = threading.Thread(target=_helixsr_job, name="opti-helixsr", daemon=True)
+        _helix_thread.start()
+    except BaseException:
+        _helix.release()
+        raise
+    return {"started": True, "busy": False}
+
+
+def _helixsr_job():
+    global _helix_error
+    work = None
+    try:
+        _helix_error = None
+        try:
+            task = ctx.task("HelixSR")
+        except ctx.Unavailable as e:
+            ctx.log.warning("task not shown: %s", e)
+            task = None
+        progress = task.update if task else (lambda fraction, text: None)
+        try:
+            GLOBAL_DIR.mkdir(parents=True, exist_ok=True)
+            work = Path(tempfile.mkdtemp(dir=GLOBAL_DIR, prefix=".helixsr-build."))
+            _helixsr_run(work, progress)
+            with _write:
+                custom.store(_custom_dir(), "helixsr", work / "out" / "helixsr.dll")
+        except files.Error as e:
+            _helix_error = str(e)
+        except OSError as e:
+            _helix_error = f"Build failed ({e.strerror or e})"
+        except Exception as e:  # never die silently: the UI shows it
+            ctx.log.exception("HelixSR build failed")
+            _helix_error = f"Build failed ({e})"
+        if _helix_error:
+            ctx.log.warning("helixsr: %s", _helix_error)
+            if task:
+                task.fail(_helix_error)
+            return
+        ctx.log.info("helixsr: built into %s", _custom_dir() / "helixsr")
+        if task:
+            task.done("Built")
+    finally:
+        if work is not None:
+            shutil.rmtree(work, ignore_errors=True)
+        _helix.release()
+
+
+def _helixsr_run(work, progress):
+    """Run the script in work (its result in work/out); a files.Error says why it failed."""
+    global _helix_proc
+    # Its temporary folder goes in work too: on disk, not in a /tmp that may be RAM, and removed with work
+    # even when the script is killed (its own cleanup doesn't run then).
+    (work / "tmp").mkdir()
+    env = dict(os.environ, TMPDIR=str(work / "tmp"))
+    # No shell; --yes accepts the DLSS license prompt (the UI's confirmation is the user's).
+    _helix_proc = proc = subprocess.Popen(
+        ["bash", str(HELIXSR_SCRIPT), "--yes", "--out", str(work / "out")],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+        env=env, start_new_session=True,
+    )
+    if _stop.is_set():  # teardown came before there was a script to stop
+        _kill_build()
+    timed_out = threading.Event()
+
+    def expire():
+        timed_out.set()
+        _kill_build()
+
+    timer = threading.Timer(HELIXSR_TIMEOUT, expire)
+    timer.start()
+    tail = collections.deque(maxlen=40)
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            tail.append(line)
+            stage = _helixsr_stage(line)
+            if stage:
+                progress(*stage)
+        proc.wait()
+    finally:
+        timer.cancel()
+        if proc.poll() is None:
+            _kill_build()
+            proc.wait()
+        proc.stdout.close()
+        _helix_proc = None
+    if _stop.is_set():
+        raise files.Error("Build stopped")
+    if timed_out.is_set():
+        raise files.Error("The HelixSR build timed out")
+    if proc.returncode != 0:
+        ctx.log.error("%s exited %s: %s", HELIXSR_SCRIPT, proc.returncode, "\n".join(tail))
+        error = next((l for l in reversed(tail) if l.startswith(DIE)), tail[-1] if tail else "")
+        raise files.Error(f"Build failed: {error.removeprefix(DIE)}")
+
+
+def _kill_build():
+    """Stop the build's script and everything it started (its own session)."""
+    proc = _helix_proc
+    if proc is not None and proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 def teardown():
-    """Stop a download (its next block, or its unpacking) and wait for it: once the module is unloaded (or
-    uninstalled with its data) nothing may write to GLOBAL_DIR anymore."""
+    """Stop a download (its next block, or its unpacking) or a HelixSR build, and wait for them: once the
+    module is unloaded (or uninstalled with its data) nothing may write to GLOBAL_DIR anymore."""
     _stop.set()
-    if _thread is not None:
-        _thread.join(TEARDOWN_WAIT)
+    _kill_build()
+    deadline = time.monotonic() + TEARDOWN_WAIT
+    for thread in (_thread, _helix_thread):
+        if thread is not None:
+            thread.join(max(0, deadline - time.monotonic()))
 
 
 def uninstall(context, purge):
@@ -438,4 +646,7 @@ METHODS = {
     "custom_remove": custom_remove,
     "nightly_status": nightly_status,
     "nightly_download": nightly_download,
+    "helixsr_status": helixsr_status,
+    "helixsr_build": helixsr_build,
+    "helixsr_check": helixsr_check,
 }

@@ -535,6 +535,27 @@ interface NightlyStatus {
 
 const POLL = 2000;
 
+interface HelixStatus {
+  busy: boolean;
+  error: string | null;
+}
+
+interface HelixCheck {
+  installed: string | null;
+  latest: string | null;
+  update: boolean;
+}
+
+const BUILD_LABEL = "Download and compile";
+
+/** The build button's label and the line above it, from the last check (null: not checked yet). */
+function buildText(check: HelixCheck | null): { label: string; line: string } {
+  if (!check?.latest) return { label: BUILD_LABEL, line: "" };
+  if (!check.installed) return { label: BUILD_LABEL, line: `Latest stable HelixSR: ${check.latest}` };
+  if (check.update) return { label: `Update to ${check.latest}`, line: `HelixSR ${check.latest} is out` };
+  return { label: "Recompile", line: `Up to date: ${check.latest} is the latest stable HelixSR` };
+}
+
 /**
  * The "OptiScaler" group at the top of Global: the nightly downloaded and a button to get the
  * latest. Built once per panel and kept across the page's rebuilds: it only changes its own text.
@@ -614,11 +635,21 @@ class NightlyBox {
 
 const nightlyBox = new NightlyBox();
 
-/** "Custom DLLs" in Global: one line per slot with what's kept, Choose… and Remove. Kept across rebuilds. */
+/**
+ * "Custom DLLs" in Global: one line per slot with what's kept, Choose… and Remove; HelixSR can also be
+ * downloaded and compiled here (the build runs in the backend, followed until it ends). Kept across rebuilds.
+ */
 class CustomBox {
   el: HTMLElement | null = null;
   private open = false;
   private rows = new Map<string, { text: HTMLElement; remove: ReturnType<typeof ui.button> }>();
+  private build: ReturnType<typeof ui.button> | null = null;
+  private latest: HTMLElement | null = null;
+  private problem: HTMLElement | null = null;
+  private check: HelixCheck | null = null;
+  private error: string | null = null;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private busy = false;
 
   element(ctx: ModuleCtx) {
     if (this.el) return this.el;
@@ -637,15 +668,30 @@ class CustomBox {
       });
       this.rows.set(slot.id, { text, remove });
       children.push(text, choose, remove);
+      if (slot.id === "helixsr") {
+        this.build = ui.button({
+          label: BUILD_LABEL,
+          hint: "The latest stable HelixSR from github.com/lonewolf0622/HelixSR, built on this device",
+          onClick: () => void this.startBuild(ctx),
+        });
+        this.latest = ui.info("");
+        this.latest.hidden = true;
+        this.problem = ui.info("");
+        this.problem.hidden = true;
+        children.push(this.latest, this.build, this.problem);
+      }
     }
     this.el = foldable("Custom DLLs", children, this.open, (open) => void (this.open = open));
     return this.el;
   }
 
   reset() {
-    this.el = null;
+    clearTimeout(this.timer);
+    this.el = this.build = this.latest = this.problem = null;
+    this.check = this.error = null;
     this.rows.clear();
     this.open = false;
+    this.busy = false;
   }
 
   async refresh(ctx: ModuleCtx) {
@@ -654,6 +700,72 @@ class CustomBox {
     } catch (e) {
       ctx.toast(errorText(e), "error");
     }
+    void this.refreshBuild(ctx);
+    void this.refreshCheck(ctx);
+  }
+
+  /** Is there a newer HelixSR? The backend asks GitHub at most once an hour; offline, the button just builds. */
+  private async refreshCheck(ctx: ModuleCtx) {
+    try {
+      this.check = await ctx.call<HelixCheck>("helixsr_check");
+    } catch {
+      this.check = null;
+    }
+    this.showBuild(this.busy, this.error);
+  }
+
+  private async refreshBuild(ctx: ModuleCtx) {
+    clearTimeout(this.timer);
+    let s: HelixStatus;
+    try {
+      s = await ctx.call<HelixStatus>("helixsr_status");
+    } catch (e) {
+      this.showBuild(false, errorText(e));
+      return;
+    }
+    const finished = this.busy && !s.busy;
+    this.showBuild(s.busy, s.error);
+    if (finished) {
+      ctx.toast(s.error ? `HelixSR: ${s.error}` : "HelixSR built", s.error ? "error" : "ok");
+      if (!s.error) {
+        void this.refresh(ctx);
+        void renderGame(ctx, true); // its toggles depend on it
+      }
+    }
+    if (s.busy) this.timer = setTimeout(() => void this.refreshBuild(ctx), POLL);
+  }
+
+  private showBuild(busy: boolean, error: string | null) {
+    this.busy = busy;
+    this.error = error;
+    if (!this.build || !this.problem) return;
+    this.problem.textContent = error ?? "";
+    this.problem.hidden = !error || busy;
+    const text = buildText(this.check);
+    if (this.latest) {
+      this.latest.textContent = text.line;
+      this.latest.hidden = !text.line || busy;
+    }
+    this.build.setLabel(busy ? "Compiling…" : text.label);
+    this.build.setDisabled(busy, busy ? "Compiling: see the Tasks panel (Select)" : undefined);
+  }
+
+  private async startBuild(ctx: ModuleCtx) {
+    const ok = await ui.confirm(
+      "Download the latest stable HelixSR and compile it on this device? It takes a few minutes, and to build it NVIDIA's DLSS DLL is downloaded and used once (NVIDIA's license). The DLL you get is for this device only: don't share it. It replaces the module's copy of HelixSR; games that have it keep theirs.",
+      { ok: "Compile" },
+    );
+    if (!ok) return;
+    try {
+      const r = await ctx.call<{ started: boolean; busy: boolean }>("helixsr_build");
+      if (r.started) {
+        this.busy = true;
+        ctx.toast("Compiling HelixSR");
+      }
+    } catch (e) {
+      ctx.toast(errorText(e), "error");
+    }
+    void this.refreshBuild(ctx);
   }
 
   private show(status: CustomStatus) {
@@ -670,6 +782,7 @@ class CustomBox {
     try {
       this.show(await ctx.call<CustomStatus>("custom_set", { slot, path }));
       ctx.toast("Kept");
+      void this.refreshCheck(ctx);
       void renderGame(ctx, true); // its toggles depend on it
     } catch (e) {
       ctx.toast(errorText(e), "error");
@@ -680,6 +793,7 @@ class CustomBox {
     if (!(await ui.confirm(`Remove the module's copy of ${title}? Games that have it keep theirs.`, { ok: "Remove" }))) return;
     try {
       this.show(await ctx.call<CustomStatus>("custom_remove", { slot }));
+      void this.refreshCheck(ctx);
       void renderGame(ctx, true);
     } catch (e) {
       ctx.toast(errorText(e), "error");

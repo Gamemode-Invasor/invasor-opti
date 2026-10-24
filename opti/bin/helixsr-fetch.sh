@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# helixsr-fetch.sh - downloads the latest stable HelixSR, builds it on this device and leaves its DLL and ini.
+#
+#   ./helixsr-fetch.sh --out DIR [--yes]
+#
+#   --out DIR       where to leave the result (made if needed)
+#   --yes, -y       don't ask (accepts the download of NVIDIA's DLSS DLL the build needs)
+#
+# Leaves in DIR:
+#   helixsr.dll     HelixSR with its network embedded
+#   helixsr.ini     its settings, as the release ships them
+# Everything is built in a temporary folder, removed always (zip, portable Python, shader compiler, Wine
+# prefix): under $TMPDIR, so point it at a disk when /tmp is in RAM. helixsr-setup.sh runs unchanged, but its games step is disabled in the temporary copy: only the
+# DLL is built, nothing is installed in any game.
+# Needs: bash, curl, unzip, Python 3 with numpy (or the setup downloads a portable one) and Proton/Wine.
+#
+# NOTICE: the network comes from NVIDIA's DLSS DLL (its license). The DLLs built are for your own device:
+# don't share or upload them.
+set -euo pipefail
+
+REPO="lonewolf0622/HelixSR"
+API="https://api.github.com/repos/$REPO/releases/latest"  # the latest stable one
+OUT=""
+ASSUME_YES=0
+DLSS_LICENSE="https://github.com/NVIDIA/DLSS/blob/v310.7.0/LICENSE.txt"
+DLL_NAME="helixsr.dll"
+INI_NAME="helixsr.ini"
+
+say() { printf '[helixsr-fetch] %s\n' "$*"; }
+die() { printf '[helixsr-fetch] error: %s\n' "$*" >&2; exit 1; }
+usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# --- arguments ---
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out) [ $# -ge 2 ] || die "--out needs a folder"; OUT="$2"; shift ;;
+        --out=*) OUT="${1#--out=}" ;;
+        --yes|-y) ASSUME_YES=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown option: $1 (try --help)" ;;
+    esac
+    shift
+done
+[ -n "$OUT" ] || die "--out is needed"
+[ "$(uname -m)" = x86_64 ] || die "x86-64 Linux only"
+for t in curl unzip; do
+    command -v "$t" >/dev/null || die "missing tool: $t"
+done
+
+# --- which version ---
+say "looking for the latest stable version..."
+JSON=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$API") || die "can't query $API"
+TAG=$(printf '%s' "$JSON" | grep -o '"tag_name": *"[^"]*"' | head -n1 | sed 's/.*: *"\(.*\)"/\1/')
+# The release also has other zips (HelixSR Scaler): HelixSR-<version>.zip, else the first one.
+ZIPS=$(printf '%s' "$JSON" | grep -o '"browser_download_url": *"[^"]*\.zip"' | sed 's/.*: *"\(.*\)"/\1/' || true)
+URL=$(printf '%s\n' "$ZIPS" | grep -E '/HelixSR-[0-9][^/]*\.zip$' | head -n1 || true)
+[ -n "$URL" ] || URL=$(printf '%s\n' "$ZIPS" | head -n1)
+[ -n "$TAG" ] && [ -n "$URL" ] || die "no release with a zip in $API"
+say "version: $TAG"
+
+# --- confirmation (NVIDIA's DLL is downloaded and used once) ---
+if [ "$ASSUME_YES" != 1 ]; then
+    [ -t 0 ] || die "no interactive terminal: use --yes to accept the download of NVIDIA's DLL"
+    cat <<EOF
+HelixSR $TAG will be downloaded and, to build it, NVIDIA's DLSS 310.7.0 DLL (used once and removed).
+Its license: $DLSS_LICENSE
+The DLLs built carry NVIDIA's network: they're for this device only, don't share them.
+Into: $OUT
+EOF
+    read -r -p "Continue? [Y/n] " ans || ans=n
+    case "$ans" in ''|y|Y|yes|YES) ;; *) die "cancelled" ;; esac
+fi
+
+# --- temporary folder (removed always) ---
+T=$(mktemp -d) || die "can't make a temporary folder"
+cleanup() { rm -rf "$T"; }
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+say "downloading..."
+curl -fL --retry 3 -sS -o "$T/helixsr.zip" "$URL" || die "download failed: $URL"
+mkdir -p "$T/pkg" "$T/data" "$T/cache" "$T/config"
+unzip -q "$T/helixsr.zip" -d "$T/pkg" || die "can't unpack the zip"
+SETUP=$(find "$T/pkg" -name helixsr-setup.sh | head -n1)
+[ -n "$SETUP" ] || die "this release has no helixsr-setup.sh"
+PKG=$(dirname "$SETUP")
+
+# --- keep the games step away: only the DLL is built here ---
+# HelixSR v2.0.0 (2026-10-19) makes helixsr-setup.sh forward --yes to its games step
+# (setup/helixsr_install.py), which then installs HelixSR in EVERY game it finds.
+# Two barriers; if neither can be set up, the script dies before the setup runs:
+#   A) setup/helixsr_install.py of the temporary copy -> no-op (the games step doesn't run);
+#   B) a temporary HOME without Steam libraries (the scan uses Path.home()): the scan finds no game;
+#      only the real Proton/Wine tool is linked there, which the build needs for the shader compiler
+#      (compatibilitytools.d isn't a library).
+A_OK=0
+B_OK=0
+SETUP_HOME="$HOME"
+INSTALLER="$PKG/setup/helixsr_install.py"
+if [ -f "$INSTALLER" ]; then
+    cat > "$INSTALLER" <<'PY'
+#!/usr/bin/env python3
+import sys
+print("[helixsr-setup] games step skipped (helixsr-fetch: only the DLL is built)", flush=True)
+sys.exit(0)
+PY
+    A_OK=1
+    say "games step disabled (this build only makes the DLL)"
+else
+    say "warning: this release has no setup/helixsr_install.py (did HelixSR change?): the temporary HOME is needed"
+fi
+for p in "$HOME"/.local/share/Steam/steamapps/common/Proton*/files/bin/wine \
+         "$HOME"/.steam/steam/steamapps/common/Proton*/files/bin/wine \
+         "$HOME"/.local/share/Steam/compatibilitytools.d/*/files/bin/wine \
+         "$HOME"/.steam/root/compatibilitytools.d/*/files/bin/wine; do
+    if [ -x "$p" ]; then
+        TOOL=${p%/files/bin/wine}
+        mkdir -p "$T/home/.local/share/Steam/compatibilitytools.d"
+        ln -sfn "$TOOL" "$T/home/.local/share/Steam/compatibilitytools.d/$(basename "$TOOL")"
+        SETUP_HOME="$T/home"
+        B_OK=1
+        say "temporary HOME for the setup (games hidden; Proton/Wine linked: $(basename "$TOOL"))"
+        break
+    fi
+done
+if [ "$B_OK" = 0 ]; then
+    say "warning: no Proton/Wine found for the temporary HOME: the setup runs with the real HOME"
+fi
+if [ "$A_OK" = 0 ] && [ "$B_OK" = 0 ]; then
+    die "can't disable or isolate the games step: check helixsr-fetch.sh against this release"
+fi
+
+# --- build with the official setup ---
+# --yes accepts its downloads (agreed above); since HelixSR v2.0.0 it also forwards --yes to the games
+# step (hence the no-op and the temporary HOME above). XDG_* send Python/DXC/prefix and caches to the
+# temporary folder.
+say "building HelixSR (it can take a few minutes)..."
+LOG="$T/build.log"
+set +e
+( cd "$PKG" && HOME="$SETUP_HOME" XDG_DATA_HOME="$T/data" XDG_CACHE_HOME="$T/cache" XDG_CONFIG_HOME="$T/config" \
+    bash ./helixsr-setup.sh --yes </dev/null ) 2>&1 \
+    | tee "$LOG"
+set -e
+
+# --- find the result (whatever folders the author uses) ---
+# The DLL: a .dll over 1 MB with the network embedded (HXSRNET1 marker at its end).
+has_net() { [ -f "$1" ] && [ "$(wc -c <"$1")" -gt 1048576 ] && [ "$(tail -c 32 "$1" | head -c 8 | tr -d '\0')" = HXSRNET1 ]; }
+fail() {
+    printf '[helixsr-fetch] ---- last lines of the build ----\n' >&2
+    tail -n 30 "$LOG" >&2 || true
+    die "$1"
+}
+
+SRC_DLL=""; SRC_DIR=""
+CANDIDATES=()
+while IFS= read -r d; do CANDIDATES+=("$d"); done < <(find "$T/pkg" -type d -name fsr-dropin 2>/dev/null)
+CANDIDATES+=("$PKG/fsr3-drop-in" "$PKG")
+for d in "${CANDIDATES[@]}"; do
+    [ -d "$d" ] || continue
+    for f in "$d/amd_fidelityfx_dx12.dll" "$d/amd_fidelityfx_upscaler_dx12.dll" "$d"/*.dll; do
+        if has_net "$f"; then SRC_DLL="$f"; SRC_DIR="$d"; break 2; fi
+    done
+done
+[ -n "$SRC_DLL" ] || fail "the build made no DLL with the network embedded (did HelixSR's format change?)"
+
+SRC_INI="$SRC_DIR/$INI_NAME"
+[ -f "$SRC_INI" ] || SRC_INI=$(find "$T/pkg" -name "$INI_NAME" 2>/dev/null | head -n1)
+
+# --- leave the result ---
+mkdir -p "$OUT" || die "can't make $OUT"
+cp -f "$SRC_DLL" "$OUT/$DLL_NAME" || die "can't copy $DLL_NAME to $OUT"
+if [ -n "$SRC_INI" ] && [ -f "$SRC_INI" ]; then
+    cp -f "$SRC_INI" "$OUT/$INI_NAME" || die "can't copy $INI_NAME to $OUT"
+else
+    say "warning: this release has no $INI_NAME; HelixSR will use its defaults"
+fi
+say "done: HelixSR $TAG in $OUT"
