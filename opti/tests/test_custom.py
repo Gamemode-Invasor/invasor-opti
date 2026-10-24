@@ -287,7 +287,7 @@ class HelixCheckTest(unittest.TestCase):
     def test_up_to_date_and_older(self):
         self.keep((2, 0, 0, 0))
         self.assertEqual(self.b.helixsr_check(), {"installed": "2.0.0.0", "latest": "v2.0.0", "update": False})
-        self.b._latest_cache["at"] = 0.0  # the hour is over
+        self.b._latest_cache["ttl"] = 0  # the hour is over
         self.tag = "v2.0.1"
         self.assertTrue(self.b.helixsr_check()["update"])
 
@@ -298,7 +298,7 @@ class HelixCheckTest(unittest.TestCase):
         self.tag = "v2.0.0"
         self.b.helixsr_check()
         self.assertEqual(self.asked, 1)  # a failed check waits before asking again
-        self.b._latest_cache["at"] = 0.0
+        self.b._latest_cache["ttl"] = 0  # the retry wait is over
         self.assertTrue(self.b.helixsr_check()["update"])
         self.b.helixsr_check()
         self.assertEqual(self.asked, 2)
