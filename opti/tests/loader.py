@@ -3,6 +3,7 @@ import importlib.util
 import itertools
 import logging
 import sys
+import types
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
@@ -44,6 +45,7 @@ class FakeCtx:
     InvalidArgument = InvalidArgument
     Unavailable = Unavailable
     log = _log
+    game = types.SimpleNamespace(selected=None, running=None)
 
     def task(self, label):
         raise Unavailable("no Tasks panel in the tests")  # the backend's plan B
