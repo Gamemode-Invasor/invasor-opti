@@ -9,7 +9,7 @@ An [Invasor](https://github.com/Gamemode-Invasor/invasor) module for [OptiScaler
 
   Under it, **Custom DLLs** keeps the DLLs the module can't ship, chosen with a file browser (a big window: `..` goes up, a folder opens, a `.dll` is picked by pressing it), with the version each file says it is:
   - **FSR 4 (AMD driver DLLs)**: `amdxcffx64.dll` from AMD's driver, and `amdvkffx64.dll` if it's next to it (INT8 RDNA2 and INT8 Lite need it).
-  - **HelixSR**: its DLL (kept as `helixsr.dll`), and `helixsr.ini` if it's next to it. Or **Download and compile**, after asking: `opti/bin/helixsr-fetch.sh` downloads the latest stable release of [HelixSR](https://github.com/lonewolf0622/HelixSR) and builds it on this device with HelixSR's own setup (which downloads NVIDIA's DLSS DLL, under NVIDIA's license, and uses it once), in a temporary folder and with its games step turned off, so nothing is installed in any game; the `helixsr.dll` and `helixsr.ini` it makes are kept here like a chosen DLL. It runs as a task in the Tasks panel (it can take a few minutes, not while a game is running) and needs `curl`, `unzip` and a Proton in Steam. The DLL carries NVIDIA's network: it's for your own device, don't share it. The module asks GitHub for the latest stable tag (at most once an hour) and compares it with the version the kept `helixsr.dll` says it is: the button then reads **Update to v…** when there's a newer one, or **Recompile** when it's up to date.
+  - **HelixSR**: its DLL (kept as `helixsr.dll`), and `helixsr.ini` if it's next to it. Or **Download and compile**, after asking: `opti/bin/helixsr-fetch.sh` downloads the latest stable release of [HelixSR](https://github.com/lonewolf0622/HelixSR) and builds it on this device with HelixSR's own setup (which downloads NVIDIA's DLSS DLL, under NVIDIA's license, and uses it once), in a temporary folder and with its games step turned off, so nothing is installed in any game; the `helixsr.dll` and `helixsr.ini` it makes are kept here like a chosen DLL. It runs as a task in the Tasks panel (it can take a few minutes, not while a game is running) and needs `curl` and `unzip`, plus a Proton (or Wine) in Steam, which HelixSR's setup uses for its shader compiler (and Python 3 with numpy, or it downloads a portable one). The DLL carries NVIDIA's network: it's for your own device, don't share it. The module asks GitHub for the latest stable tag (at most once an hour once it has an answer; a failed check is retried after 2 minutes) and compares it with the version the kept `helixsr.dll` says it is: the button then reads **Update to v…** when there's a newer one, or **Recompile** when it's up to date.
 
   The module keeps a copy in `~/.local/share/invasor-opti/custom/`, so the original can move or be on a card that isn't there. **Remove** forgets it; games that have it keep theirs.
 - **Credits**: author, thanks to OptiScaler and HelixSR, and that this module isn't affiliated with either.
@@ -44,6 +44,9 @@ python3 ../invasor/tools/install_module.py opti    # or install that zip from �
 
 ## Changes
 
+### 0.1.1
+- Global → Custom DLLs: **Download and compile** builds the latest stable HelixSR on this device and keeps its `helixsr.dll` and `helixsr.ini` (it replaces HelixSR in the Companion module). The button tells when a newer stable HelixSR is out (**Update to v…**) or yours is the latest (**Recompile**).
+
 ### 0.1.0
 - First release.
 
@@ -52,5 +55,5 @@ python3 ../invasor/tools/install_module.py opti    # or install that zip from �
 
 ### Third-party
 - `opti/assets/OptiScaler.optiscaler.ini` is OptiScaler's own file, and `opti/assets/OptiScaler.invasor.ini` is made from it: [OptiScaler](https://github.com/optiscaler/OptiScaler) is GPL-3.0.
-- No DLL is shipped with the module. OptiScaler is downloaded from its own nightly releases, which carry the licenses of what they include (FidelityFX, XeSS, DirectX) in their `Licenses` folder. AMD's driver DLLs and HelixSR are files you bring, or HelixSR is built on your machine with **Download and compile**: they're copied only on your machine.
+- No DLL is shipped with the module. OptiScaler is downloaded from its own nightly releases, which carry the licenses of what they include (FidelityFX, XeSS, DirectX) in their `Licenses` folder. AMD's driver DLLs and HelixSR are files you bring, or HelixSR is built on your machine with **Download and compile**: they're copied only on your machine. To build HelixSR, its own setup downloads NVIDIA's DLSS DLL ([NVIDIA's license](https://github.com/NVIDIA/DLSS/blob/v310.7.0/LICENSE.txt)) and uses it once; the DLL it makes carries NVIDIA's network and is for your own device only.
 - This module isn't affiliated with OptiScaler, HelixSR or AMD.
