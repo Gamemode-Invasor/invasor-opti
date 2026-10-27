@@ -1,8 +1,8 @@
-import { currentGame, defineModule, ui, type ModuleCtx, type WindowHandle, type WindowSpec } from "invasor";
+import { currentGame, defineModule, ui, type ModuleCtx } from "invasor";
 
 // OptiScaler: OptiScaler.ini files, built from the files themselves.
 // Game: the selected game's, plus installing OptiScaler in it (the build Global downloaded) and the
-// launch line to copy. Global: the module's own, the one a game gets, with two resets, under the
+// launch line to copy or apply. Global: the module's own, the one a game gets, with two resets, under the
 // OptiScaler nightly the module has downloaded (and a button to get the latest) and the custom DLLs.
 // Credits last.
 // Everything sits in a folded "All Configuration" group (in Game, a switch hides the keys still at OptiScaler's
@@ -69,6 +69,7 @@ interface Install {
   dll: string | null;
   extras?: Record<string, boolean>;
   launch_ok?: boolean | null; // the game's launch options load it as `dll` (null: nothing to tell)
+  can_apply?: boolean; // "Apply to the game" can write them (Steam has the call)
 }
 
 interface Build {
@@ -99,80 +100,13 @@ function buildName(b: Build) {
   return `${b.version || b.tag}${d}`;
 }
 
-// Steam's CEF may not give navigator.clipboard to this page: fall back to execCommand.
-async function copyText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.style.position = "fixed";
-    area.style.opacity = "0";
-    document.body.append(area);
-    area.select();
-    try {
-      return document.execCommand("copy");
-    } catch {
-      return false;
-    } finally {
-      area.remove();
-    }
-  }
-}
+let lastFolder: string | undefined; // where the DLL picker opens next time, while the panel lives
 
-interface Dir {
-  path: string;
-  parent: string | null;
-  dirs: { name: string; label: string }[];
-  files: { name: string }[];
-  error: string | null;
-}
-
-const join = (dir: string, name: string) => (dir === "/" ? "/" : dir + "/") + name;
-let lastFolder: string | undefined; // where the browser opens next time, while the panel lives
-let browser: WindowHandle | null = null; // the browser's window, while it's open
-
-// File browser in a big window (Companion's): ".." goes up, a folder opens, a .dll is chosen by pressing it.
-// ctx.openWindow returns null (and tells the user why) where there's no room.
-function openBrowser(ctx: ModuleCtx, title: string, onPick: (path: string) => void) {
-  browser?.close();
-  const spec: WindowSpec = {
-    title,
-    async render(box, wctx) {
-      async function show(path?: string) {
-        let dir: Dir;
-        try {
-          dir = await wctx.call<Dir>("browse", path ? { path } : {});
-        } catch (e) {
-          box.replaceChildren(ui.info(errorText(e)));
-          return;
-        }
-        lastFolder = dir.path;
-        const items: HTMLElement[] = [ui.info(dir.path)];
-        if (dir.error) items.push(ui.info(`Can't read this folder: ${dir.error}`));
-        const go = (p: string) => () => void show(p);
-        if (dir.parent) items.push(ui.button({ label: "..", onClick: go(dir.parent) }));
-        for (const d of dir.dirs) items.push(ui.button({ label: `📁 ${d.label}`, onClick: go(join(dir.path, d.name)) }));
-        for (const f of dir.files) {
-          items.push(
-            ui.button({
-              label: f.name,
-              onClick: () => {
-                onPick(join(dir.path, f.name));
-                browser?.close();
-              },
-            }),
-          );
-        }
-        if (!dir.dirs.length && !dir.files.length && !dir.error) items.push(ui.info("No folders or .dll files here."));
-        box.replaceChildren(...items);
-      }
-      await show(lastFolder);
-    },
-    onClose: () => void (browser = null),
-  };
-  browser = ctx.openWindow(spec);
+/** A .dll picked in the core's file picker (ctx.pickPath), or null when the user closed it. */
+async function pickDll(ctx: ModuleCtx, title: string): Promise<string | null> {
+  const path = await ctx.pickPath({ title, files: true, ext: [".dll"], start: lastFolder });
+  if (path) lastFolder = path.slice(0, path.lastIndexOf("/")) || "/";
+  return path;
 }
 
 /** What the "Hide default values" switch hides: a key's control, and whether its value is OptiScaler's own. */
@@ -428,9 +362,18 @@ function installation(ctx: ModuleCtx, key: unknown, loaded: Loaded): HTMLElement
       ui.button({
         label: "Copy",
         hint: "Copy it, to paste in the game's launch options (🟢 they have it, 🔴 they don't)",
-        onClick: async () => ((await copyText(line)) ? ctx.toast("Copied") : ctx.toast("Couldn't copy it", "error")),
+        onClick: async () => ((await ctx.copy(line)) ? ctx.toast("Copied") : ctx.toast("Couldn't copy it", "error")),
       }),
     );
+    if (inst.can_apply) {
+      parts.push(
+        ui.button({
+          label: "Apply to the game",
+          hint: "Write it into the game's launch options in Steam; the rest of the line stays",
+          onClick: () => void applyLaunch(ctx, appid),
+        }),
+      );
+    }
   } else if (inst.installed) {
     parts.push(ui.info("OptiScaler is installed, but no DLL name loads it: pick one under Installation."));
   }
@@ -508,6 +451,16 @@ function installation(ctx: ModuleCtx, key: unknown, loaded: Loaded): HTMLElement
   }
   parts.push(foldable("Installation", children, installOpen, (open) => void (installOpen = open)));
   return parts;
+}
+
+async function applyLaunch(ctx: ModuleCtx, appid: string) {
+  try {
+    const r = await ctx.call<{ verified: boolean }>("game_apply_launch", { appid });
+    ctx.toast(r.verified ? "Launch options applied" : "Applied, but Steam couldn't confirm it");
+  } catch (e) {
+    ctx.toast(errorText(e), "error");
+  }
+  void renderGame(ctx, true);
 }
 
 async function gameAction(ctx: ModuleCtx, method: string, args: Record<string, unknown>, done: string) {
@@ -659,7 +612,10 @@ class CustomBox {
       const choose = ui.button({
         label: slot.choose,
         hint: slot.hint,
-        onClick: () => void openBrowser(ctx, slot.choose, (path) => void this.store(ctx, slot.id, path)),
+        onClick: async () => {
+          const path = await pickDll(ctx, slot.choose);
+          if (path) void this.store(ctx, slot.id, path);
+        },
       });
       const remove = ui.button({
         label: `Remove ${slot.title}`,
@@ -895,7 +851,6 @@ export default defineModule({
     nightlyBox.reset();
     customBox.reset();
     lastFolder = undefined;
-    browser?.close();
     resetOpen = false;
   },
 });

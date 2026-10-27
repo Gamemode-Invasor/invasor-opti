@@ -1,4 +1,3 @@
-import io
 import json
 import shutil
 import struct
@@ -7,7 +6,7 @@ import types
 import unittest
 from pathlib import Path
 
-from tests.loader import FakeCtx, InvalidArgument, Unavailable, fake_steam, load_backend, submodule
+from tests.loader import FakeCtx, InvalidArgument, Unavailable, fake_steam, load_backend, submodule, swap_dir
 
 
 def fake_dll(product="HelixSR", version=(2, 0, 0, 0), machine=0x8664, dll=True):
@@ -61,7 +60,7 @@ class CustomTest(unittest.TestCase):
     def test_fsr4_takes_its_sibling(self):
         (self.src / "AMDXCFFX64.DLL").write_bytes(fake_dll("AMD", (2, 4, 0, 4370)))
         (self.src / "amdvkffx64.dll").write_bytes(fake_dll("AMD VK", (2, 4, 0, 4370)))
-        self.c.store(self.kept, "fsr4", str(self.src / "amdvkffx64.dll"))
+        self.c.store(self.kept, "fsr4", str(self.src / "amdvkffx64.dll"), swap_dir)
         s = self.c.status(self.kept)
         self.assertEqual([f["name"] for f in s["fsr4"]], ["amdxcffx64.dll", "amdvkffx64.dll"])
         self.assertEqual(s["fsr4"][0]["version"], "2.4.0.4370")
@@ -69,28 +68,28 @@ class CustomTest(unittest.TestCase):
 
     def test_fsr4_alone_and_wrong_name(self):
         (self.src / "amdxcffx64.dll").write_bytes(fake_dll())
-        self.c.store(self.kept, "fsr4", str(self.src / "amdxcffx64.dll"))
+        self.c.store(self.kept, "fsr4", str(self.src / "amdxcffx64.dll"), swap_dir)
         self.assertEqual([f["name"] for f in self.c.status(self.kept)["fsr4"]], ["amdxcffx64.dll"])
         (self.src / "other.dll").write_bytes(fake_dll())
         with self.assertRaises(self.c.Error):
-            self.c.store(self.kept, "fsr4", str(self.src / "other.dll"))
+            self.c.store(self.kept, "fsr4", str(self.src / "other.dll"), swap_dir)
 
     def test_refuses_what_isnt_a_dll(self):
         (self.src / "fake.dll").write_bytes(b"MZ not really")
         (self.src / "x.txt").write_text("x")
         for name in ("fake.dll", "x.txt"):
             with self.assertRaises(self.c.Error):
-                self.c.store(self.kept, "helixsr", str(self.src / name))
+                self.c.store(self.kept, "helixsr", str(self.src / name), swap_dir)
         with self.assertRaises(ValueError):
-            self.c.store(self.kept, "helixsr", "relative.dll")
+            self.c.store(self.kept, "helixsr", "relative.dll", swap_dir)
         with self.assertRaises(ValueError):
-            self.c.store(self.kept, "nope", str(self.src / "fake.dll"))
+            self.c.store(self.kept, "nope", str(self.src / "fake.dll"), swap_dir)
         self.assertIsNone(self.c.status(self.kept)["helixsr"])
 
     def test_helixsr_in_a_game(self):
         (self.src / "HelixSR-2.dll").write_bytes(fake_dll())
         (self.src / "helixsr.ini").write_text("[Upscaling]\n")
-        self.c.store(self.kept, "helixsr", str(self.src / "HelixSR-2.dll"))
+        self.c.store(self.kept, "helixsr", str(self.src / "HelixSR-2.dll"), swap_dir)
         self.assertEqual(self.c.status(self.kept)["helixsr"][0], {"name": "helixsr.dll", "product": "HelixSR", "version": "2.0.0.0"})
         self.assertEqual(self.c.game_state(self.umu), {"fsr4": False, "helixsr": False})
         game = self.umu / "OptiScaler"
@@ -108,31 +107,17 @@ class CustomTest(unittest.TestCase):
         with self.assertRaises(self.c.Error):
             self.c.enable(self.kept, self.umu, "fsr4")  # nothing kept
         (self.src / "amdxcffx64.dll").write_bytes(fake_dll())
-        self.c.store(self.kept, "fsr4", str(self.src / "amdxcffx64.dll"))
+        self.c.store(self.kept, "fsr4", str(self.src / "amdxcffx64.dll"), swap_dir)
         (self.umu / "OptiScaler.dll").unlink()
         with self.assertRaises(self.c.Error):
             self.c.enable(self.kept, self.umu, "fsr4")  # OptiScaler not installed
 
     def test_remove(self):
         (self.src / "amdxcffx64.dll").write_bytes(fake_dll())
-        self.c.store(self.kept, "fsr4", str(self.src / "amdxcffx64.dll"))
+        self.c.store(self.kept, "fsr4", str(self.src / "amdxcffx64.dll"), swap_dir)
         self.c.remove(self.kept, "fsr4")
         self.assertIsNone(self.c.status(self.kept)["fsr4"])
         self.assertEqual([p.name for p in self.kept.iterdir()], [])  # no temp left
-
-
-class BrowseTest(unittest.TestCase):
-    def test_only_folders_and_dlls(self):
-        b = submodule(load_backend(), "browse")
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, tmp)
-        for name in ("b.DLL", "a.dll", "c.txt", ".hidden.dll"):
-            (tmp / name).write_text("")
-        (tmp / "Sub").mkdir()
-        (tmp / ".git").mkdir()
-        d = b.listdir(str(tmp))
-        self.assertEqual(([x["name"] for x in d["dirs"]], [x["name"] for x in d["files"]]), (["Sub"], ["a.dll", "b.DLL"]))
-        self.assertIsNotNone(b.listdir(str(tmp / "missing"))["error"])
 
 
 class GameExtraTest(unittest.TestCase):
@@ -147,7 +132,7 @@ class GameExtraTest(unittest.TestCase):
         self.b = load_backend()
         self.b.setup(FakeCtx())
         self.b.GLOBAL_DIR = tmp / "invasor-opti"
-        fake_steam(self.b, steam)
+        fake_steam(steam)
         build = self.b.GLOBAL_DIR / "optiscaler"
         (build / "OptiScaler").mkdir(parents=True)
         (build / "OptiScaler.dll").write_bytes(b"opti")
@@ -266,16 +251,16 @@ class HelixCheckTest(unittest.TestCase):
         self.b = load_backend()
         self.b.setup(FakeCtx())
         self.b.GLOBAL_DIR = self.tmp / "invasor-opti"
-        self.asked = 0
-        self.tag = "v2.0.0"
-        n = submodule(self.b, "nightly")
+        self.http = self.b.ctx.http
+        self.answer("v2.0.0")
 
-        def open_url(url, timeout=30):
-            self.asked += 1
-            if self.tag is None:
-                raise n.Error("offline")
-            return io.BytesIO(json.dumps({"tag_name": self.tag}).encode())
-        n.open_url = open_url
+    def answer(self, tag):
+        """GitHub's answer for the latest stable HelixSR (None: offline)."""
+        self.http.answers[self.b.HELIXSR_RELEASE_API] = Unavailable("couldn't get it: offline") if tag is None else {"tag_name": tag}
+
+    @property
+    def asked(self):
+        return len(self.http.asked)
 
     def keep(self, version):
         (self.tmp / "helixsr.dll").write_bytes(fake_dll(version=version))
@@ -288,14 +273,14 @@ class HelixCheckTest(unittest.TestCase):
         self.keep((2, 0, 0, 0))
         self.assertEqual(self.b.helixsr_check(), {"installed": "2.0.0.0", "latest": "v2.0.0", "update": False})
         self.b._latest_cache["ttl"] = 0  # the hour is over
-        self.tag = "v2.0.1"
+        self.answer("v2.0.1")
         self.assertTrue(self.b.helixsr_check()["update"])
 
     def test_cached_and_offline(self):
         self.keep((1, 9, 3, 0))
-        self.tag = None
+        self.answer(None)
         self.assertEqual(self.b.helixsr_check(), {"installed": "1.9.3.0", "latest": None, "update": False})
-        self.tag = "v2.0.0"
+        self.answer("v2.0.0")
         self.b.helixsr_check()
         self.assertEqual(self.asked, 1)  # a failed check waits before asking again
         self.b._latest_cache["ttl"] = 0  # the retry wait is over

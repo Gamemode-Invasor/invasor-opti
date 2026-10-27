@@ -18,17 +18,3 @@ def copy_file(src, dest):
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
-
-
-def replace_dir(new, target, trash):
-    """The folder new becomes target in two renames; the old target (if any) is left at trash, for the
-    caller to remove. All three must be on the same filesystem."""
-    target = Path(target)
-    if target.exists() or target.is_symlink():
-        os.replace(target, trash)
-    os.replace(new, target)
-
-
-def has_symlink(folder):
-    """True if anything inside folder is a symbolic link."""
-    return any(p.is_symlink() for p in Path(folder).rglob("*"))

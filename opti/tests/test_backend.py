@@ -17,7 +17,7 @@ class BackendTest(unittest.TestCase):
         (self.steam / "steamapps").mkdir(parents=True)
         self.b = load_backend()
         self.b.setup(FakeCtx())
-        fake_steam(self.b, self.steam)
+        fake_steam(self.steam)
 
     def prefix(self, appid="123"):
         umu = self.steam / "steamapps/compatdata" / appid / "pfx/drive_c/windows/system32/umu"
