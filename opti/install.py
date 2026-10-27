@@ -1,4 +1,4 @@
-"""OptiScaler in a game's Proton prefix: the umu folder (steamlibs.UMU) Wine's OptiScaler hack loads it
+"""OptiScaler in a game's Proton prefix: the umu folder (UMU) Wine's OptiScaler hack loads it
 from, as WINE_OPTISCALER_NAME=<dll>.dll says. There, <dll>.dll is a link to OptiScaler.dll.
 
 What is OptiScaler's in umu, and nothing else is ever touched: OptiScaler.dll, OptiScaler.ini, the
@@ -11,12 +11,15 @@ import re
 import shutil
 from pathlib import Path
 
-from .files import Error, copy_file, replace_dir
+from .files import Error, copy_file
 from .nightly import MAIN_DLL, MARKER, read_marker
 
 DLL_NAMES = ("dxgi", "d3d12", "dbghelp", "winmm")
 INI = "OptiScaler.ini"
 FOLDER = "OptiScaler"  # OptiScaler's own folder, next to OptiScaler.dll
+COPY = f".{FOLDER}.copy"  # the build's folder, copied next to the game's before the swap
+# Where Wine's OptiScaler hack (GE-Proton, proton-cachyos) loads WINE_OPTISCALER_NAME from, in compatdata/<appid>.
+UMU = Path("pfx/drive_c/windows/system32/umu")
 
 
 def in_launch_options(options, dll):
@@ -25,6 +28,27 @@ def in_launch_options(options, dll):
     m = re.search(r"(?:^|\s)WINE_OPTISCALER_NAME=([\"']?)(?i:" + re.escape(dll) + r"\.dll)\1(?=\s|$)", options or "")
     command = (options or "").find("%command%")
     return m is not None and command > m.start()
+
+
+def with_dll(options, dll):
+    """The launch options with OptiScaler loaded as <dll>.dll, the rest of the user's line kept: a
+    WINE_OPTISCALER_NAME=… word before %command% is replaced, else the word goes first. A line without
+    %command% is the game's arguments (Steam puts them after it), so they go after %command%."""
+    _check_dll(dll)
+    word = f"WINE_OPTISCALER_NAME={dll}.dll"
+    options = (options or "").strip()
+    command = options.find("%command%")
+    if command < 0:
+        return f"{word} %command% {options}".strip()
+    m = re.search(r"(?:^|(?<=\s))WINE_OPTISCALER_NAME=(?:\"[^\"]*\"|'[^']*'|\S*)(?=\s|$)", options[:command])
+    if m:
+        return options[:m.start()] + word + options[m.end():]
+    return f"{word} {options}"
+
+
+def _leftovers(umu):
+    """What a crash left of an install: the copy, and swap_dir's own .OptiScaler.old-*/.new-* (nothing else)."""
+    return [umu / COPY, *umu.glob(f".{FOLDER}.old-*"), *umu.glob(f".{FOLDER}.new-*")]
 
 
 def _check_dll(dll):
@@ -49,7 +73,7 @@ def _loaders(umu):
 
 
 def state(umu):
-    """{"installed", "version": the marker (see nightly.installed) or None, "dll": the first name
+    """{"installed", "version": the marker (see nightly.read_marker) or None, "dll": the first name
     that loads OptiScaler or None}."""
     umu = Path(umu)
     if not (umu / MAIN_DLL).is_file():
@@ -78,10 +102,11 @@ def set_dll(umu, dll):
     (umu / f"{dll}.dll").symlink_to(MAIN_DLL)
 
 
-def install(build, umu, global_ini, dll):
+def install(build, umu, global_ini, dll, swap):
     """Copy the build (a folder as nightly.update leaves it) into umu: OptiScaler.dll, the
     OptiScaler folder and its marker; global_ini as OptiScaler.ini unless the game has one; and
-    <dll>.dll linked to OptiScaler.dll."""
+    <dll>.dll linked to OptiScaler.dll. swap(new, target) puts a folder in place at once
+    (ctx.archive.swap_dir)."""
     _check_dll(dll)
     build, umu = Path(build), Path(umu)
     if not (build / MAIN_DLL).is_file():
@@ -89,13 +114,12 @@ def install(build, umu, global_ini, dll):
     main = umu / MAIN_DLL
     _free(umu, dll, main if main.is_file() else build / MAIN_DLL)
     umu.mkdir(parents=True, exist_ok=True)
-    folder, new, old = umu / FOLDER, umu / f".{FOLDER}.new", umu / f".{FOLDER}.old"
-    for leftover in (new, old):
+    for leftover in _leftovers(umu):
         shutil.rmtree(leftover, ignore_errors=True)
     if (build / FOLDER).is_dir():
+        new = umu / COPY
         shutil.copytree(build / FOLDER, new)
-        replace_dir(new, folder, old)
-        shutil.rmtree(old, ignore_errors=True)
+        swap(new, umu / FOLDER)
     copy_file(build / MAIN_DLL, main)
     if not (umu / INI).exists():
         copy_file(global_ini, umu / INI)
@@ -140,8 +164,7 @@ def uninstall(umu):
         p = umu / name
         if p.is_file() or p.is_symlink():
             p.unlink()
-    for name in (FOLDER, f".{FOLDER}.new", f".{FOLDER}.old"):
-        p = umu / name
+    for p in [umu / FOLDER, *_leftovers(umu)]:
         if p.is_symlink():
             p.unlink()
         elif p.is_dir():

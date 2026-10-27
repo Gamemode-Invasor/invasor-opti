@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 
 from . import pe
-from .files import Error, copy_file, replace_dir
+from .files import Error, copy_file
 from .install import FOLDER
 from .nightly import MAIN_DLL
 
@@ -79,8 +79,9 @@ def _sources(slot, path):
     return {name: src for name, src in found.items() if src}
 
 
-def store(folder, slot, path):
-    """Keep a copy of the slot's files, from the one the user picked (path). Replaces the slot whole."""
+def store(folder, slot, path, swap):
+    """Keep a copy of the slot's files, from the one the user picked (path). Replaces the slot whole,
+    with swap(new, target) (ctx.archive.swap_dir)."""
     files = _sources(slot, path)
     info = {}
     for name, src in files.items():
@@ -96,7 +97,7 @@ def store(folder, slot, path):
         for name, src in files.items():
             shutil.copyfile(src, new / name)
         (new / INFO).write_text(json.dumps(info, indent=1) + "\n")
-        replace_dir(new, folder / slot, work / "old")
+        swap(new, folder / slot)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

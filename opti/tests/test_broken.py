@@ -126,7 +126,7 @@ class BrokenFileTest(unittest.TestCase):
         self.path = self.umu / "OptiScaler.ini"
         self.b = load_backend()
         self.b.setup(FakeCtx())
-        fake_steam(self.b, steam)
+        fake_steam(steam)
 
     def test_folder_named_like_the_ini(self):
         self.path.mkdir()

@@ -1,6 +1,4 @@
 import hashlib
-import io
-import json
 import shutil
 import subprocess
 import tempfile
@@ -9,16 +7,22 @@ import time
 import unittest
 from pathlib import Path
 
-from tests.loader import FakeCtx, load_backend, submodule
+from tests.loader import FakeCtx, FakeHttp, InvalidArgument, Unavailable, archive, load_backend, submodule
 
 NAME = "OptiScaler_v10.0.0-pre1_20261023.7z"
 
 
 def release(data, name=NAME, digest=True, tag="nightly-20261023"):
-    asset = {"name": name, "size": len(data), "browser_download_url": f"https://github.com/optiscaler/OptiScaler-nightly/releases/download/{tag}/{name}"}
+    asset = {"name": name, "browser_download_url": f"https://github.com/optiscaler/OptiScaler-nightly/releases/download/{tag}/{name}"}
     if digest:
         asset["digest"] = "sha256:" + hashlib.sha256(data).hexdigest()
     return {"tag_name": tag, "assets": [{"name": "notes.txt", "browser_download_url": "x"}, asset]}
+
+
+def server(n, rel, data):
+    """ctx.http with GitHub's answer (a list holding rel) and the .7z it points to."""
+    url = next(a["browser_download_url"] for a in rel["assets"] if a["name"].endswith(".7z"))
+    return FakeHttp({n.API: [rel]}, {url: data})
 
 
 def make_7z(folder, files):
@@ -31,17 +35,14 @@ def make_7z(folder, files):
     return out.read_bytes()
 
 
-class Server:
-    """open_url for the tests: the API answer and the .7z, and how many times each was asked."""
+class Task:
+    """A ctx.task's update, recorded."""
 
-    def __init__(self, releases, data):
-        self.releases, self.data, self.asked = releases, data, []
+    def __init__(self):
+        self.steps = []
 
-    def __call__(self, url, timeout):
-        self.asked.append(url)
-        if url.startswith("https://api.github.com/"):
-            return io.BytesIO(json.dumps(self.releases).encode())
-        return io.BytesIO(self.data)
+    def update(self, fraction, text):
+        self.steps.append(text)
 
 
 class NightlyTest(unittest.TestCase):
@@ -69,24 +70,11 @@ class NightlyTest(unittest.TestCase):
                 self.n.pick(r)
 
     def test_no_checksum_no_download(self):
-        server = Server([release(b"abc", digest=False)], b"abc")
+        http = server(self.n, release(b"abc", digest=False), b"abc")
         with self.assertRaisesRegex(self.n.Error, "checksum"):
-            self.n.update(self.tmp / "optiscaler", server)
+            self.n.update(self.tmp / "optiscaler", http, archive)
+        self.assertEqual(http.downloads, [])
         self.assertEqual(list(self.tmp.iterdir()), [])
-
-    def test_7z_symlinks_are_refused(self):
-        listing = "Path = a.dll\nSymbolic Link = \n\nPath = evil\nSymbolic Link = /etc\n\nPath = evil/x\n"
-        found = self.n.names(listing, True)
-        self.assertEqual(found, ["a.dll", None, "evil/x"])
-        self.assertEqual([self.n.safe(n) for n in found], [True, False, True])
-
-    def test_unpacking_stops_when_asked(self):
-        stop = threading.Event()
-        threading.Timer(0.2, stop.set).start()
-        started = time.monotonic()
-        with self.assertRaisesRegex(self.n.Error, "stopped"):
-            self.n._run(["sleep", "30"], stop)
-        self.assertLess(time.monotonic() - started, 5)
 
     def test_pick_refuses(self):
         for bad in (None, [], {}, {"assets": None}, {"assets": [1, "x", {"name": "a.zip", "browser_download_url": "u"}]}):
@@ -94,7 +82,7 @@ class NightlyTest(unittest.TestCase):
                 self.n.pick(bad)
         for answer in ([], {}, "x"):
             with self.assertRaises(self.n.Error):
-                self.n.latest(Server(answer, b""))
+                self.n.latest(FakeHttp({self.n.API: answer}))
 
     def test_installed(self):
         self.assertIsNone(self.n.read_marker(self.tmp))
@@ -105,37 +93,24 @@ class NightlyTest(unittest.TestCase):
         marker.write_text('{"tag": "t", "version": "v1", "extra": 1}')
         self.assertEqual(self.n.read_marker(self.tmp), {"tag": "t", "version": "v1", "date": None, "asset": None, "sha256": None})
 
-    def test_safe_paths(self):
-        for ok in ("OptiScaler.dll", "./OptiScaler/a.dll", "a..b/c"):
-            self.assertTrue(self.n.safe(ok), ok)
-        for bad in ("/etc/passwd", "../x", "a/../../x", "C:\\Windows\\x", "a\\..\\..\\x"):
-            self.assertFalse(self.n.safe(bad), bad)
-        self.assertEqual(self.n.names("Path = /tmp/a.7z\nType = 7z\n\nPath = x.dll\nSize = 1\n", True), ["/tmp/a.7z", "x.dll"])
-
     def test_bad_checksum_leaves_nothing(self):
         data = b"not the real thing"
-        server = Server([release(b"x" * len(data))], data)
-        folder = self.tmp / "optiscaler"
-        with self.assertRaisesRegex(self.n.Error, "checksum"):
-            self.n.update(folder, server)
+        http = server(self.n, release(b"x" * len(data)), data)
+        with self.assertRaisesRegex(InvalidArgument, "checksum"):
+            self.n.update(self.tmp / "optiscaler", http, archive)
         self.assertEqual(list(self.tmp.iterdir()), [])
 
-    def test_cut_short(self):
-        r = release(b"0123456789")
-        server = Server([r], b"01234")
-        with self.assertRaisesRegex(self.n.Error, "incomplete"):
-            self.n.update(self.tmp / "optiscaler", server)
-
-    def test_stop(self):
-        stop = threading.Event()
-        stop.set()
-        with self.assertRaisesRegex(self.n.Error, "stopped"):
-            self.n.update(self.tmp / "optiscaler", Server([release(b"x")], b"x"), stop=stop)
+    def test_offline(self):
+        http = FakeHttp({self.n.API: Unavailable("couldn't get it: no network")})
+        with self.assertRaises(Unavailable):
+            self.n.update(self.tmp / "optiscaler", http, archive)
         self.assertEqual(list(self.tmp.iterdir()), [])
 
 
 @unittest.skipUnless(shutil.which("bsdtar"), "needs bsdtar")
 class UnpackTest(unittest.TestCase):
+    """update() with the core's own ctx.archive."""
+
     @classmethod
     def setUpClass(cls):
         cls.n = submodule(load_backend(), "nightly")
@@ -145,40 +120,48 @@ class UnpackTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         self.folder = self.tmp / "data" / "optiscaler"
 
+    def second(self):
+        """Where a second .7z is made (not next to the build)."""
+        d = self.tmp / "second"
+        d.mkdir()
+        return d
+
     def test_download_and_swap(self):
         data = make_7z(self.tmp, {"OptiScaler.dll": b"dll", "OptiScaler.ini": b"[A]\nX=1\n"})
-        server = Server([release(data)], data)
-        steps = []
-        r, downloaded = self.n.update(self.folder, server, lambda f, t: steps.append((f, t)))
+        rel = release(data)
+        http, task = server(self.n, rel, data), Task()
+        r, downloaded = self.n.update(self.folder, http, archive, task)
         self.assertTrue(downloaded)
         self.assertEqual((self.folder / "OptiScaler.dll").read_bytes(), b"dll")
         self.assertEqual(self.n.read_marker(self.folder)["version"], "v10.0.0-pre1")
-        self.assertIn((1.0, f"Downloading: 0 of 0 MB"), steps)
+        self.assertEqual(task.steps, ["Looking for the latest nightly", "Unpacking"])
+        d = http.downloads[0]
+        self.assertEqual((d["checksum"], d["max_bytes"], d["task"]), (("sha256", r["sha256"]), self.n.MAX_SIZE, task))
         self.assertEqual(sorted(p.name for p in self.folder.parent.iterdir()), ["optiscaler"])  # no temp left
 
         # The same tag again: nothing downloaded.
-        server.asked.clear()
-        self.assertFalse(self.n.update(self.folder, server)[1])
-        self.assertEqual(len(server.asked), 1)
+        http.asked.clear()
+        self.assertFalse(self.n.update(self.folder, http, archive)[1])
+        self.assertEqual(http.asked, [self.n.API])
 
         # A newer one replaces the old folder whole.
-        data2 = make_7z(self.tmp / "data", {"OptiScaler.dll": b"dll2"})
-        r2, downloaded = self.n.update(self.folder, Server([release(data2, tag="nightly-20261024")], data2))
+        data2 = make_7z(self.second(), {"OptiScaler.dll": b"dll2"})
+        r2, downloaded = self.n.update(self.folder, server(self.n, release(data2, tag="nightly-20261024"), data2), archive)
         self.assertTrue(downloaded)
         self.assertEqual((self.folder / "OptiScaler.dll").read_bytes(), b"dll2")
         self.assertFalse((self.folder / "OptiScaler.ini").exists())
         self.assertEqual(self.n.read_marker(self.folder)["tag"], "nightly-20261024")
+        self.assertEqual(sorted(p.name for p in self.folder.parent.iterdir()), ["optiscaler"])
 
     def test_archive_without_the_dll(self):
         data = make_7z(self.tmp, {"readme.txt": b"hi"})
         with self.assertRaisesRegex(self.n.Error, "no OptiScaler.dll"):
-            self.n.update(self.folder, Server([release(data)], data))
+            self.n.update(self.folder, server(self.n, release(data), data), archive)
         self.assertFalse(self.folder.exists())
 
     def test_asset_name_is_never_a_path(self):
         data = make_7z(self.tmp, {"OptiScaler.dll": b"dll"})
-        r = release(data, name="../../escape.7z")
-        self.assertTrue(self.n.update(self.folder, Server([r], data))[1])
+        self.assertTrue(self.n.update(self.folder, server(self.n, release(data, name="../../escape.7z"), data), archive)[1])
         self.assertEqual(sorted(p.name for p in self.tmp.rglob("escape*")), [])
 
     def test_symlink_in_the_archive_is_refused(self):
@@ -189,19 +172,32 @@ class UnpackTest(unittest.TestCase):
         out = self.tmp / "build.7z"
         subprocess.run(["bsdtar", "--format", "7zip", "-cf", str(out), "-C", str(src), "OptiScaler.dll", "evil.dll"], check=True)
         data = out.read_bytes()
-        with self.assertRaisesRegex(self.n.Error, "symbolic link"):
-            self.n.update(self.folder, Server([release(data)], data))
+        with self.assertRaises(InvalidArgument):
+            self.n.update(self.folder, server(self.n, release(data), data), archive)
         self.assertFalse(self.folder.exists())
 
     def test_not_an_archive(self):
         data = b"garbage" * 100
-        with self.assertRaises(self.n.Error):
-            self.n.update(self.folder, Server([release(data)], data))
+        with self.assertRaises((InvalidArgument, Unavailable)):
+            self.n.update(self.folder, server(self.n, release(data), data), archive)
         self.assertFalse(self.folder.exists())
 
+    def test_stop_before_the_swap_keeps_the_old_build(self):
+        data = make_7z(self.tmp, {"OptiScaler.dll": b"old"})
+        self.n.update(self.folder, server(self.n, release(data), data), archive)
+        data2 = make_7z(self.second(), {"OptiScaler.dll": b"new"})
+        stop = threading.Event()
 
-if __name__ == "__main__":
-    unittest.main()
+        class Lock:  # the module unloads while waiting for the swap
+            def __enter__(self):
+                stop.set()
+
+            def __exit__(self, *exc):
+                return False
+        with self.assertRaisesRegex(self.n.Error, "stopped"):
+            self.n.update(self.folder, server(self.n, release(data2, tag="t2"), data2), archive, stop=stop, swap_lock=Lock())
+        self.assertEqual((self.folder / "OptiScaler.dll").read_bytes(), b"old")
+        self.assertEqual(sorted(p.name for p in self.folder.parent.iterdir()), ["optiscaler"])
 
 
 class DownloadThreadTest(unittest.TestCase):
@@ -216,7 +212,7 @@ class DownloadThreadTest(unittest.TestCase):
         self.n = submodule(self.b, "nightly")
         self.release = threading.Event()
 
-        def slow_update(folder, progress, stop, swap_lock):
+        def slow_update(folder, http, archive, task, stop, swap_lock):
             while not stop.is_set() and not self.release.is_set():
                 time.sleep(0.01)
             raise self.n.Error("Download stopped")

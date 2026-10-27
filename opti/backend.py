@@ -1,7 +1,7 @@
 """OptiScaler: OptiScaler.ini files from Invasor's panel, and OptiScaler itself in games.
 
 Two files: the selected game's, in its Proton prefix, in the folder Wine's OptiScaler hack loads
-it from (steamlibs.UMU); and the module's own Global one (GLOBAL_DIR/OptiScaler.ini), the one a game
+it from (install.UMU); and the module's own Global one (GLOBAL_DIR/OptiScaler.ini), the one a game
 gets when OptiScaler is installed in it. The Global one starts as a copy of
 assets/OptiScaler.invasor.ini and can be reset to that or to OptiScaler's own
 (assets/OptiScaler.optiscaler.ini).
@@ -16,7 +16,6 @@ line of that key (comments, order and line ends stay as they are), atomically, a
 other program saved the file since the UI read it.
 """
 import collections
-import json
 import os
 import re
 import shutil
@@ -27,8 +26,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import custom, files, ini, install, nightly, steamlibs
-from .browse import listdir
+from . import custom, files, ini, install, nightly
 
 ASSETS = Path(__file__).resolve().parent / "assets"
 # What the Global file can be reset to: OptiScaler's own file and the one this module ships.
@@ -55,6 +53,10 @@ HELIXSR_CHECK_TTL = 3600  # seconds a found tag is reused; a failed check is ret
 HELIXSR_CHECK_RETRY = 120
 _latest_cache = {"at": 0.0, "ttl": 0, "tag": None}
 _latest_lock = threading.Lock()
+SUPPORTS_TTL = 60  # seconds Steam's "yes, it can set launch options" is reused; a "no" is asked again after SUPPORTS_RETRY
+SUPPORTS_RETRY = 10
+_supports_cache = {"at": 0.0, "ttl": 0, "found": False}
+_supports_lock = threading.Lock()
 _helix = threading.Lock()  # held while a build runs
 _helix_error = None  # why the last build failed, for the UI
 _helix_thread = None  # the build's, while it runs
@@ -89,10 +91,45 @@ def _appid(appid):
     return appid
 
 
+def _umu_dir(appid):
+    """The game's umu folder (it may not exist yet), or None: the game never ran with Proton."""
+    try:
+        prefix = ctx.paths.compatdata(appid)
+    except ctx.Unavailable:  # no Steam folder
+        return None
+    return prefix / install.UMU if (prefix / "pfx" / "drive_c").is_dir() else None
+
+
 def _ini_path(appid):
     """The game's OptiScaler.ini (it may not exist), or None if the game has no Proton prefix."""
-    umu = steamlibs.umu_dir(_appid(appid))
+    umu = _umu_dir(_appid(appid))
     return umu / install.INI if umu else None
+
+
+def _launch_options(appid):
+    """The game's launch options ("" when none), or None when nothing says. Steam's own answer, else
+    Steam's files: shortcuts.vdf, and localconfig.vdf for a Steam game (which Steam writes only from
+    time to time, so it may lag)."""
+    try:
+        return ctx.steam.launch_options(appid)
+    except (ctx.Unavailable, ctx.InvalidArgument):
+        pass
+    try:
+        shortcut = ctx.paths.shortcuts().get(appid)
+        if shortcut is not None:
+            return shortcut["options"]
+        accounts = ctx.paths.userdata(all=True)
+    except ctx.Unavailable:
+        return None
+    for account in accounts:
+        try:
+            root = ctx.vdf.loads_text((account / "config" / "localconfig.vdf").read_text(errors="replace"))
+        except (OSError, ctx.InvalidArgument):
+            continue
+        entry = ctx.vdf.get(root, "UserLocalConfigStore", "Software", "Valve", "Steam", "apps", appid)
+        if isinstance(entry, dict):
+            return str(ctx.vdf.get(entry, "LaunchOptions", default=""))
+    return None
 
 
 def _read(path):
@@ -186,12 +223,21 @@ def _set_in_file(path, section, key, value, mtime):
 
 # ---------- The selected game ----------
 
+def _can_set_launch_options():
+    """ctx.steam.supports("set_launch_options"), remembered for a while: it asks Steam over CEF."""
+    with _supports_lock:
+        if time.monotonic() - _supports_cache["at"] >= _supports_cache["ttl"]:
+            found = ctx.steam.supports("set_launch_options")
+            _supports_cache.update(at=time.monotonic(), ttl=SUPPORTS_TTL if found else SUPPORTS_RETRY, found=found)
+        return _supports_cache["found"]
+
+
 def load(appid):
     """The game's file, as _load_file (each key with "default": OptiScaler's own value for it, or None), or
     state "no_prefix" if the game has no Proton prefix. Plus:
     - "install": install.state of its umu folder, with "extras" (the custom slots it has on) and "launch_ok"
-      (whether its launch options load OptiScaler as that DLL; None when there's nothing to tell); None
-      without a prefix;
+      (whether its launch options load OptiScaler as that DLL; None when there's nothing to tell) and
+      "can_apply" (whether game_apply_launch can write them); None without a prefix;
     - "build": the nightly Global has downloaded (nightly.read_marker), or None;
     - "custom": {slot: kept in Global}."""
     appid = _appid(appid)
@@ -205,9 +251,12 @@ def load(appid):
             for k in sec["keys"]:
                 k["default"] = defaults.get((sec["name"], k["key"]))  # None: OptiScaler's file hasn't the key
         r["install"] = {**install.state(path.parent), "extras": custom.game_state(path.parent)}
-        dll, options = r["install"]["dll"], steamlibs.launch_options(appid)
+        dll = r["install"]["dll"]
+        options = _launch_options(appid) if dll else None
         # Whether the launch options load OptiScaler as that DLL; None when there's nothing to tell.
-        r["install"]["launch_ok"] = install.in_launch_options(options, dll) if dll and options is not None else None
+        r["install"]["launch_ok"] = install.in_launch_options(options, dll) if options is not None else None
+        # Whether "Apply to the game" can write them (Steam may lack the call: then only Copy).
+        r["install"]["can_apply"] = bool(dll) and r["install"]["installed"] and _can_set_launch_options()
     r["build"] = nightly.read_marker(_nightly_dir())
     r["custom"] = {slot: kept is not None for slot, kept in custom.status(_custom_dir()).items()}
     return r
@@ -254,7 +303,7 @@ def game_install(appid, dll):
     with _build:
         if nightly.read_marker(build) is None:
             raise ctx.Unavailable("There is no OptiScaler to install: download it in Global first")
-        return _in_game(appid, f"install OptiScaler as {dll}.dll", lambda umu: install.install(build, umu, global_ini, dll))
+        return _in_game(appid, f"install OptiScaler as {dll}.dll", lambda umu: install.install(build, umu, global_ini, dll, ctx.archive.swap_dir))
 
 
 def game_update(appid):
@@ -272,6 +321,24 @@ def game_uninstall(appid):
 
 def game_set_dll(appid, dll):
     return _in_game(appid, f"load OptiScaler as {dll}.dll", lambda umu: install.set_dll(umu, dll))
+
+
+def game_apply_launch(appid):
+    """Make the game's launch options load OptiScaler as its DLL name (install.with_dll keeps the rest of
+    the line); returns load(appid) with "verified": False when Steam took them but couldn't read them back."""
+    appid = _appid(appid)
+    umu = _game_umu(appid)
+    state = install.state(umu)
+    if not (state["installed"] and state["dll"]):
+        raise ctx.Unavailable("OptiScaler isn't installed in this game with a DLL name")
+    try:  # Steam's own line only: localconfig.vdf may lag, and would undo what the user just set
+        current = ctx.steam.launch_options(appid)
+    except (ctx.Unavailable, ctx.InvalidArgument):
+        raise ctx.Unavailable("Steam didn't tell the current launch options: try again") from None
+    line = install.with_dll(current, state["dll"])
+    r = ctx.steam.set_launch_options(appid, line)
+    ctx.log.info("%s: launch options set to %r", appid, line)
+    return {**load(appid), "verified": r["verified"]}
 
 
 def game_extra(appid, slot, on):
@@ -342,13 +409,6 @@ def _custom_dir():
     return GLOBAL_DIR / CUSTOM_NAME
 
 
-def browse(path=None):
-    """One folder of the file browser (its folders and .dll files); without a valid path, home."""
-    if not isinstance(path, str) or not os.path.isabs(path) or not os.path.isdir(path):
-        path = str(Path.home())
-    return listdir(path)
-
-
 def custom_status():
     """{slot: [{"name", "product", "version"}] or None}, see custom.status."""
     return custom.status(_custom_dir())
@@ -357,7 +417,7 @@ def custom_status():
 def custom_set(slot, path):
     """Keep a copy of a slot's DLLs, from the file the user picked; returns custom_status()."""
     with _write:
-        _guarded("copy it", lambda: custom.store(_custom_dir(), slot, path), ctx.InvalidArgument)
+        _guarded("copy it", lambda: custom.store(_custom_dir(), slot, path, ctx.archive.swap_dir), ctx.InvalidArgument)
     ctx.log.info("custom %s: from %s", slot, path)
     return custom_status()
 
@@ -404,11 +464,12 @@ def _download_job():
         except ctx.Unavailable as e:
             ctx.log.warning("task not shown: %s", e)
             task = None
-        progress = task.update if task else (lambda fraction, text: None)
         try:
-            release, downloaded = nightly.update(_nightly_dir(), progress=progress, stop=_stop, swap_lock=_build)
+            release, downloaded = nightly.update(_nightly_dir(), ctx.http, ctx.archive, task=task, stop=_stop, swap_lock=_build)
         except files.Error as e:
             _last_error = str(e)
+        except (ctx.Unavailable, ctx.InvalidArgument) as e:  # the download or the unpacking, said by the core
+            _last_error = f"Download failed ({e})"
         except Exception as e:  # never die silently: the UI shows it
             ctx.log.exception("nightly download failed")
             _last_error = f"Download failed ({e})"
@@ -465,10 +526,10 @@ def _helixsr_latest():
             return cache["tag"]
         tag = None
         try:
-            with nightly.open_url(HELIXSR_RELEASE_API, 8) as r:
-                tag = json.load(r).get("tag_name")
+            answer = ctx.http.get_json(HELIXSR_RELEASE_API)
+            tag = answer.get("tag_name") if isinstance(answer, dict) else None
             tag = tag if isinstance(tag, str) and tag else None
-        except (files.Error, OSError, ValueError, AttributeError) as e:
+        except (ctx.Unavailable, ctx.InvalidArgument) as e:
             ctx.log.info("can't check the latest HelixSR: %s", e)
         cache.update(at=time.monotonic(), ttl=HELIXSR_CHECK_TTL if tag else HELIXSR_CHECK_RETRY, tag=tag)
         return tag
@@ -531,7 +592,7 @@ def _helixsr_job():
             work = Path(tempfile.mkdtemp(dir=GLOBAL_DIR, prefix=".helixsr-build."))
             _helixsr_run(work, progress)
             with _write:
-                custom.store(_custom_dir(), "helixsr", work / "out" / "helixsr.dll")
+                custom.store(_custom_dir(), "helixsr", work / "out" / "helixsr.dll", ctx.archive.swap_dir)
         except files.Error as e:
             _helix_error = str(e)
         except OSError as e:
@@ -636,11 +697,11 @@ METHODS = {
     "game_update": game_update,
     "game_uninstall": game_uninstall,
     "game_set_dll": game_set_dll,
+    "game_apply_launch": game_apply_launch,
     "game_extra": game_extra,
     "global_load": global_load,
     "global_set": global_set,
     "global_reset": global_reset,
-    "browse": browse,
     "custom_status": custom_status,
     "custom_set": custom_set,
     "custom_remove": custom_remove,

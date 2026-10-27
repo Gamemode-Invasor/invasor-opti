@@ -14,5 +14,5 @@ jobs:
     uses: Gamemode-Invasor/invasor/.github/workflows/module.yml@main
     with:
       release: true
-      core-ref: v0.2.2
+      core-ref: v0.3.0
     secrets: inherit
