@@ -16,6 +16,8 @@
 #   VERSION         the release's tag
 #   amdxcffx64.dll  AMD's FSR 4 driver file the build used (2.4.0.4370, checked by HelixSR's setup), when the
 #                   setup got it: it's AMD's own DLL, kept for OptiScaler's FSR 4 (for this device only)
+#   nvngx_dlss.dll  NVIDIA's DLSS DLL the build used (the version and SHA-256 HelixSR's setup pins), downloaded
+#                   here and given to the setup: kept for games whose DLSS needs it next to OptiScaler
 # Everything is built in a temporary folder, removed always (zip, portable Python, shader compilers, AMD's
 # package, Wine prefix): under $TMPDIR, so point it at a disk when /tmp is in RAM. helixsr-setup.sh runs
 # unchanged, but its games step is disabled in the temporary copy: nothing is installed in any game.
@@ -34,7 +36,7 @@ DLL_NAME="helixsr.dll"
 
 say() { printf '[helixsr-fetch] %s\n' "$*"; }
 die() { printf '[helixsr-fetch] error: %s\n' "$*" >&2; exit 1; }
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # --- arguments ---
 while [ $# -gt 0 ]; do
@@ -69,7 +71,7 @@ if [ "$ASSUME_YES" != 1 ]; then
     [ -t 0 ] || die "no interactive terminal: use --yes to accept the downloads of NVIDIA's DLL and AMD's package"
     cat <<EOF
 HelixSR $TAG will be downloaded and, to build it, NVIDIA's DLSS 310.7.0 DLL and AMD's driver package (about
-420 MB, only its FSR 4 file is read; NVIDIA's DLL is used once and removed, AMD's file is left in the folder too).
+420 MB, only its FSR 4 file is read); both files are left in the folder too, for this device only.
 NVIDIA's license: $DLSS_LICENSE
 The DLLs built carry data made from NVIDIA's and AMD's files: they're for this device only, don't share them.
 Into: $OUT
@@ -162,6 +164,22 @@ else
     say "warning: this release has no setup/hlxfsr4/hlx/amd.py (did HelixSR change?): AMD's file won't be kept"
 fi
 
+# --- NVIDIA's DLSS DLL: downloaded here, as the setup pins it, and given to it with --dlss (so it's kept) ---
+SETUP_PY="$PKG/setup/helixsr_setup.py"
+DLSS_URL=$(sed -n "s/^DLSS_URL = '\(https:[^']*\)'.*/\1/p" "$SETUP_PY" 2>/dev/null | head -n1)
+DLSS_SHA=$(sed -n "s/^DLSS_SHA256 = '\([0-9a-f]\{64\}\)'.*/\1/p" "$SETUP_PY" 2>/dev/null | head -n1)
+DLSS_OUT="$T/nvidia/nvngx_dlss.dll"
+DLSS_ARGS=()
+if [ -n "$DLSS_URL" ] && [ -n "$DLSS_SHA" ]; then
+    say "downloading nvngx_dlss.dll from NVIDIA..."
+    mkdir -p "$T/nvidia"
+    curl -fL --retry 3 -sS -o "$DLSS_OUT" "$DLSS_URL" || die "download failed: $DLSS_URL"
+    echo "$DLSS_SHA  $DLSS_OUT" | sha256sum -c --status || die "nvngx_dlss.dll isn't the one HelixSR's setup expects"
+    DLSS_ARGS=(--dlss "$DLSS_OUT")
+else
+    say "warning: no DLSS_URL/DLSS_SHA256 in setup/helixsr_setup.py (did HelixSR change?): the setup downloads it, not kept"
+fi
+
 # --- build with the official setup ---
 # --yes accepts its downloads (agreed above); since HelixSR v2.0.0 it also forwards --yes to the games
 # step (hence the no-op and the temporary HOME above). XDG_* send Python/DXC/prefix and caches to the
@@ -170,7 +188,7 @@ say "building HelixSR (it can take several minutes)..."
 LOG="$T/build.log"
 set +e
 ( cd "$PKG" && HOME="$SETUP_HOME" XDG_DATA_HOME="$T/data" XDG_CACHE_HOME="$T/cache" XDG_CONFIG_HOME="$T/config" \
-    HELIXSR_FETCH_AMD="$AMD_OUT" bash ./helixsr-setup.sh --yes </dev/null ) 2>&1 \
+    HELIXSR_FETCH_AMD="$AMD_OUT" bash ./helixsr-setup.sh --yes "${DLSS_ARGS[@]}" </dev/null ) 2>&1 \
     | tee "$LOG"
 set -e
 
@@ -201,5 +219,9 @@ printf '%s\n' "$TAG" > "$OUT/VERSION"
 if [ -s "$AMD_OUT" ]; then
     cp -f "$AMD_OUT" "$OUT/amdxcffx64.dll" || die "can't copy amdxcffx64.dll to $OUT"
     say "AMD's FSR 4 file kept: amdxcffx64.dll"
+fi
+if [ -s "$DLSS_OUT" ]; then
+    cp -f "$DLSS_OUT" "$OUT/nvngx_dlss.dll" || die "can't copy nvngx_dlss.dll to $OUT"
+    say "NVIDIA's DLSS DLL kept: nvngx_dlss.dll"
 fi
 say "done: HelixSR $TAG (HelixSR Scaler, HLX DLSS and HLX FSR 4) in $OUT"

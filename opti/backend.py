@@ -6,8 +6,8 @@ only what this module needs set (INSTALL_INI, SCALER_INI).
 
 In GLOBAL_DIR, NIGHTLY_NAME holds the latest OptiScaler nightly, downloaded on request
 in a thread of its own (see nightly.py), HELIXSR_NAME HelixSR Scaler with HelixSR's upscalers, built on
-this device by bin/helixsr-fetch.sh (also in a thread of its own, see helixsr.py), and CUSTOM_NAME the
-DLLs the user brings (see custom.py). install.py puts either OptiScaler in a game, custom.py the DLLs.
+this device by bin/helixsr-fetch.sh (also in a thread of its own, see helixsr.py), and DLLS_NAME AMD's and
+NVIDIA's DLLs (see dlls.py). install.py puts either OptiScaler in a game, dlls.py the DLLs.
 
 A file is the only source of truth: every call reads it again, and a change rewrites just the
 line of that key (comments, order and line ends stay as they are), atomically, and only if no
@@ -24,7 +24,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import custom, files, helixsr, ini, install, nightly
+from . import dlls, files, helixsr, ini, install, nightly
 
 ASSETS = Path(__file__).resolve().parent / "assets"
 # OptiScaler's own file (v10.0.0-pre1): a build's when it has none, and its defaults when none is downloaded.
@@ -39,7 +39,8 @@ FLAVORS = (nightly.OPTISCALER, nightly.SCALER)
 # FidelityFX upscaler too.
 INSTALL_INI = (("Libraries", "OptiDllPath", r"c:\windows\system32\umu\OptiScaler"),)
 SCALER_INI = (("Libraries", "FfxDx12SRPath", r"C:\windows\system32\umu\OptiScaler\amd_fidelityfx_upscaler_dx12.dll"),)
-CUSTOM_NAME = "custom"
+DLLS_NAME = "dlls"
+OLD_DLLS_NAME = "custom"  # its name in 0.3.0
 MAX_BYTES = 4 * 1024 * 1024  # OptiScaler's own is ~60 KB: anything this big isn't one
 
 ctx = None
@@ -62,6 +63,9 @@ SUPPORTS_TTL = 60  # seconds Steam's "yes, it can set launch options" is reused;
 SUPPORTS_RETRY = 10
 _supports_cache = {"at": 0.0, "ttl": 0, "found": False}
 _supports_lock = threading.Lock()
+_nvidia = threading.Lock()  # held while NVIDIA's DLLs download
+_nvidia_error = None  # why the last one failed, for the UI
+_nvidia_thread = None
 _helix = threading.Lock()  # held while a build runs
 _helix_error = None  # why the last build failed, for the UI
 _helix_thread = None  # the build's, while it runs
@@ -112,17 +116,14 @@ def _ini_path(appid):
 
 
 def _launch_options(appid):
-    """The game's launch options ("" when none), or None when nothing says. Steam's own answer, else
-    Steam's files: shortcuts.vdf, and localconfig.vdf for a Steam game (which Steam writes only from
-    time to time, so it may lag)."""
+    """The game's launch options ("" when none), or None when nothing says. Steam's own answer (ctx.steam reads a
+    shortcut's from shortcuts.vdf itself), else localconfig.vdf for a Steam game (which Steam writes only from time
+    to time, so it may lag)."""
     try:
         return ctx.steam.launch_options(appid)
     except (ctx.Unavailable, ctx.InvalidArgument):
         pass
-    try:
-        shortcut = ctx.paths.shortcuts().get(appid)
-        if shortcut is not None:
-            return shortcut["options"]
+    try:  # a shortcut's are in shortcuts.vdf, which ctx.steam.launch_options reads before asking Steam
         accounts = ctx.paths.userdata(all=True)
     except ctx.Unavailable:
         return None
@@ -261,12 +262,12 @@ def _can_set_launch_options():
 def load(appid):
     """The game's file, as _load_file (each key with "default": OptiScaler's own value for it, or None), or
     state "no_prefix" if the game has no Proton prefix. Plus:
-    - "install": install.state of its umu folder, with "extras" (the custom slots it has on) and "launch_ok"
+    - "install": install.state of its umu folder, with "extras" (the DLL slots it has on) and "launch_ok"
       (whether its launch options load OptiScaler as that DLL; None when there's nothing to tell) and
       "can_apply" (whether game_apply_launch can write them); None without a prefix;
     - "build": the nightly Global has downloaded (nightly.read_marker), or None;
     - "helixsr": the HelixSR Scaler Global has built, the same way, or None;
-    - "custom": {slot: kept in Global}."""
+    - "dlls": {slot: kept in Global}."""
     appid = _appid(appid)
     path = _ini_path(appid)
     if path is None:
@@ -278,7 +279,7 @@ def load(appid):
         for sec in r["sections"]:
             for k in sec["keys"]:
                 k["default"] = defaults.get((sec["name"], k["key"]))  # None: OptiScaler's file hasn't the key
-        r["install"] = {**state, "extras": custom.game_state(path.parent)}
+        r["install"] = {**state, "extras": dlls.game_state(path.parent)}
         dll = r["install"]["dll"]
         options = _launch_options(appid) if dll else None
         # Whether the launch options load OptiScaler as that DLL; None when there's nothing to tell.
@@ -287,7 +288,7 @@ def load(appid):
         r["install"]["can_apply"] = bool(dll) and r["install"]["installed"] and _can_set_launch_options()
     r["build"] = nightly.read_marker(_nightly_dir())
     r["helixsr"] = nightly.read_marker(_helixsr_dir())
-    r["custom"] = {slot: kept is not None for slot, kept in custom.status(_custom_dir()).items()}
+    r["dlls"] = {slot: kept is not None for slot, kept in dlls.status(_dlls_dir()).items()}
     return r
 
 
@@ -357,9 +358,11 @@ def game_install(appid, dll, flavor=nightly.OPTISCALER):
     try:  # a HelixSR Scaler without its two keys loads the game's own DLLs
         if fresh or scaler:
             _apply(ini_path, {(s, k): v for s, k, v in (*INSTALL_INI, *(SCALER_INI if scaler else ()))})
-        if scaler and custom.status(_custom_dir())["fsr4"]:
+        if scaler:  # HelixSR Scaler gets the AMD DLLs kept in Global; the rest is the user's choice per game
             with _write:
-                custom.enable(_custom_dir(), umu, "fsr4")
+                for slot, s in dlls.SLOTS.items():
+                    if s["vendor"] == "amd" and dlls.has(_dlls_dir(), slot):
+                        dlls.enable(_dlls_dir(), umu, slot)
     except BaseException:
         with _write:
             install.uninstall(umu)
@@ -405,40 +408,104 @@ def game_apply_launch(appid):
 
 
 def game_extra(appid, slot, on):
-    """Turn a custom slot on or off for the game."""
-    if slot not in custom.SLOTS:
-        raise ctx.InvalidArgument(f"slot must be one of {', '.join(custom.SLOTS)}")
+    """Turn a DLL slot on or off for the game."""
+    if slot not in dlls.SLOTS:
+        raise ctx.InvalidArgument(f"slot must be one of {', '.join(dlls.SLOTS)}")
     if not isinstance(on, bool):
         raise ctx.InvalidArgument("on must be true or false")
     if on:
-        return _in_game(appid, f"turn {slot} on", lambda umu: custom.enable(_custom_dir(), umu, slot))
-    return _in_game(appid, f"turn {slot} off", lambda umu: custom.disable(umu, slot))
+        return _in_game(appid, f"turn {slot} on", lambda umu: dlls.enable(_dlls_dir(), umu, slot))
+    return _in_game(appid, f"turn {slot} off", lambda umu: dlls.disable(umu, slot))
 
 
 # ---------- Global ----------
 
-def _custom_dir():
-    return GLOBAL_DIR / CUSTOM_NAME
+def _dlls_dir():
+    """The DLLs' folder; 0.3.0's (OLD_DLLS_NAME, with its one AMD slot) is made into it the first time."""
+    folder = GLOBAL_DIR / DLLS_NAME
+    old = GLOBAL_DIR / OLD_DLLS_NAME
+    if old.is_dir() and not folder.exists():  # 0.3.0's name
+        try:
+            old.rename(folder)
+        except OSError as e:
+            ctx.log.warning("dlls: can't rename %s: %s", old, e)
+    if (folder / dlls.OLD_SLOT).is_dir():
+        try:
+            dlls.migrate(folder, ctx.archive.swap_dir)
+            ctx.log.info("dlls: 0.3.0's FSR 4 slot made into one slot per DLL")
+        except (files.Error, OSError, ctx.InvalidArgument) as e:
+            ctx.log.warning("dlls: can't move 0.3.0's FSR 4 slot: %s", e)
+    return folder
 
 
-def custom_status():
-    """{slot: [{"name", "product", "version"}] or None}, see custom.status."""
-    return custom.status(_custom_dir())
+def dlls_status():
+    """{slot: {"name", "product", "version"} or None}, see dlls.status."""
+    return dlls.status(_dlls_dir())
 
 
-def custom_set(slot, path):
-    """Keep a copy of a slot's DLLs, from the file the user picked; returns custom_status()."""
+def dlls_set(slot, path):
+    """Keep a copy of a slot's DLL, from the file the user picked; returns dlls_status()."""
     with _write:
-        _guarded("copy it", lambda: custom.store(_custom_dir(), slot, path, ctx.archive.swap_dir), ctx.InvalidArgument)
-    ctx.log.info("custom %s: from %s", slot, path)
-    return custom_status()
+        _guarded("copy it", lambda: dlls.store(_dlls_dir(), slot, path, ctx.archive.swap_dir), ctx.InvalidArgument)
+    ctx.log.info("dlls %s: from %s", slot, path)
+    return dlls_status()
 
 
-def custom_remove(slot):
+def dlls_remove(slot):
     with _write:
-        _guarded("remove it", lambda: custom.remove(_custom_dir(), slot), ctx.InvalidArgument)
-    ctx.log.info("custom %s: removed", slot)
-    return custom_status()
+        _guarded("remove it", lambda: dlls.remove(_dlls_dir(), slot), ctx.InvalidArgument)
+    ctx.log.info("dlls %s: removed", slot)
+    return dlls_status()
+
+
+def dlls_nvidia_status():
+    """{"busy", "error", "release"}: whether NVIDIA's DLLs download, why the last download failed (or None), and
+    the DLSS release they come from."""
+    return {"busy": _nvidia.locked(), "error": _nvidia_error, "release": dlls.NVIDIA_RELEASE}
+
+
+def dlls_nvidia_download():
+    """Start getting NVIDIA's three DLLs into their slots, replacing what they keep (dlls.fetch_nvidia);
+    {"started", "busy"}. dlls_nvidia_status tells how it went."""
+    global _nvidia_thread
+    thread = _start(_nvidia, _nvidia_job, "opti-nvidia")
+    if thread is None:
+        return {"started": False, "busy": True}
+    _nvidia_thread = thread
+    return {"started": True, "busy": False}
+
+
+def _nvidia_job():
+    global _nvidia_error
+    try:
+        _nvidia_error = None
+        task = _task("NVIDIA's DLSS DLLs")
+        try:
+            GLOBAL_DIR.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=GLOBAL_DIR, prefix=".nvidia.") as work:
+                got = dlls.fetch_nvidia(work, ctx.http, task=task, stop=_stop)  # the slots change only once all three are here
+                with _write:
+                    if _stop.is_set():  # the module was unloaded meanwhile: leave things as they are
+                        raise files.Error("Download stopped")
+                    for slot, path in got.items():
+                        dlls.store(_dlls_dir(), slot, path, ctx.archive.swap_dir)
+        except files.Error as e:
+            _nvidia_error = str(e)
+        except (ctx.Unavailable, ctx.InvalidArgument) as e:  # the download, said by the core
+            _nvidia_error = f"Download failed ({e})"
+        except Exception as e:  # never die silently: the UI shows it
+            ctx.log.exception("NVIDIA's DLLs download failed")
+            _nvidia_error = f"Download failed ({e})"
+        if _nvidia_error:
+            ctx.log.warning("nvidia: %s", _nvidia_error)
+            if task:
+                task.fail(_nvidia_error)
+            return
+        ctx.log.info("nvidia: DLSS %s DLLs kept in %s", dlls.NVIDIA_RELEASE, _dlls_dir())
+        if task:
+            task.done(f"NVIDIA's DLSS {dlls.NVIDIA_RELEASE} DLLs kept")
+    finally:
+        _nvidia.release()
 
 
 # ---------- Background jobs ----------
@@ -531,7 +598,8 @@ HELIXSR_STAGES = (
 )
 
 
-AMD_DLL = "amdxcffx64.dll"  # AMD's FSR 4 file, which the script leaves when HelixSR's setup got it
+# The slots of the DLLs the script leaves next to HelixSR Scaler when HelixSR's setup got them.
+KEPT_FROM_BUILD = ("amdxcffx64", "nvngx_dlss")
 SAY = "[helixsr-fetch] "  # how the script's own lines start
 DIE = SAY + "error: "  # and the one it dies with
 
@@ -616,7 +684,7 @@ def _helixsr_job():
             GLOBAL_DIR.mkdir(parents=True, exist_ok=True)
             work = Path(tempfile.mkdtemp(dir=GLOBAL_DIR, prefix=".helixsr-build."))
             _helixsr_run(work, progress)
-            _keep_amd(work / "out" / AMD_DLL)
+            _keep_dlls(work / "out")
             with _build:
                 if _stop.is_set():  # the module was unloaded meanwhile: leave things as they are
                     raise files.Error("Build stopped")
@@ -642,22 +710,25 @@ def _helixsr_job():
         _helix.release()
 
 
-def _keep_amd(path):
-    """AMD's FSR 4 file the build used (the script leaves it next to HelixSR Scaler, out of its tree): kept in the
-    fsr4 slot when it has no AMD_DLL yet (one the user chose stays), else dropped. Not keeping it fails nothing."""
-    if not path.is_file():
-        return
-    try:
-        with _write:
-            if custom.has(_custom_dir(), "fsr4", AMD_DLL):
-                ctx.log.info("helixsr: %s already in Custom DLLs, AMD's from the build not kept", AMD_DLL)
-            else:
-                custom.store(_custom_dir(), "fsr4", path, ctx.archive.swap_dir)
-                ctx.log.info("helixsr: AMD's %s kept in Custom DLLs", AMD_DLL)
-    except (files.Error, OSError, ctx.InvalidArgument) as e:
-        ctx.log.warning("helixsr: AMD's %s not kept: %s", AMD_DLL, e)
-    finally:
-        path.unlink(missing_ok=True)
+def _keep_dlls(out):
+    """AMD's and NVIDIA's DLLs the build used (the script leaves them next to HelixSR Scaler, out of its tree): each
+    kept in its slot when that has none yet (one the user chose stays), then taken out of out. Not keeping one
+    fails nothing."""
+    for slot in KEPT_FROM_BUILD:
+        path = out / dlls.SLOTS[slot]["file"]
+        if not path.is_file():
+            continue
+        try:
+            with _write:
+                if dlls.has(_dlls_dir(), slot):
+                    ctx.log.info("helixsr: %s already in DLLs, the build's not kept", path.name)
+                else:
+                    dlls.store(_dlls_dir(), slot, path, ctx.archive.swap_dir)
+                    ctx.log.info("helixsr: %s kept in DLLs", path.name)
+        except (files.Error, OSError, ctx.InvalidArgument) as e:
+            ctx.log.warning("helixsr: %s not kept: %s", path.name, e)
+        finally:
+            path.unlink(missing_ok=True)
 
 
 def _helixsr_run(work, progress):
@@ -725,13 +796,13 @@ def teardown():
     _stop.set()
     _kill_build()
     deadline = time.monotonic() + TEARDOWN_WAIT
-    for thread in (_thread, _helix_thread):
+    for thread in (_thread, _helix_thread, _nvidia_thread):
         if thread is not None:
             thread.join(max(0, deadline - time.monotonic()))
 
 
 def uninstall(context, purge):
-    """With purge, the downloaded nightly, HelixSR Scaler and the custom DLLs go too (the module's own data,
+    """With purge, the downloaded nightly, HelixSR Scaler and the DLLs go too (the module's own data,
     and anything else left in GLOBAL_DIR)."""
     if purge:
         shutil.rmtree(GLOBAL_DIR, ignore_errors=True)
@@ -746,9 +817,11 @@ METHODS = {
     "game_set_dll": game_set_dll,
     "game_apply_launch": game_apply_launch,
     "game_extra": game_extra,
-    "custom_status": custom_status,
-    "custom_set": custom_set,
-    "custom_remove": custom_remove,
+    "dlls_status": dlls_status,
+    "dlls_set": dlls_set,
+    "dlls_remove": dlls_remove,
+    "dlls_nvidia_status": dlls_nvidia_status,
+    "dlls_nvidia_download": dlls_nvidia_download,
     "nightly_status": nightly_status,
     "nightly_download": nightly_download,
     "helixsr_status": helixsr_status,
