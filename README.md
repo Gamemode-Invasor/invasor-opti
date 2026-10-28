@@ -69,7 +69,7 @@ python3 ../invasor/tools/install_module.py opti    # or install that zip from âš
 
 ## Changes
 
-### Unreleased
+### 0.3.1
 - Global: **Custom DLLs** is now **DLLs (AMD/Nvidia)**, with an AMD group (FSR 4 for DirectX 12 and Vulkan) and an NVIDIA one (DLSS, DLSS Ray Reconstruction and DLSS Frame Generation), each DLL with its own Choose and Remove. **Download NVIDIA's DLSS v310.7.0 DLLs** gets NVIDIA's three from NVIDIA's GitHub. Every group starts folded. 0.3.0's FSR 4 DLLs and its `custom/` folder (now `dlls/`) are moved by themselves.
 - Game: one switch per DLL. HelixSR Scaler still gets the AMD ones when it's installed.
 - Fix: the version shown for NVIDIA's DLLs (it read a stray value in their code instead of their version resource).

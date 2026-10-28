@@ -2,7 +2,7 @@
   "api": 1,
   "min_core": "0.3.0",
   "name": "OptiHLX",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "FranjeGueje",
   "description": "OptiScaler and HelixSR Scaler from the panel: get the latest nightly or compile HelixSR Scaler (HLX DLSS and HLX FSR 4), install either in the selected game with AMD's and NVIDIA's DLLs, and edit its OptiScaler.ini, every option with its description.",
   "order": 45,
