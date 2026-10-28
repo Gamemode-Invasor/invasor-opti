@@ -62,7 +62,7 @@ python3 ../invasor/tools/install_module.py opti    # or install that zip from âš
 
 ## Changes
 
-### Unreleased
+### 0.3.0
 - HelixSR 3.x: **Download and compile** (now its own **HelixSR** group in Global) keeps HelixSR Scaler with HLX DLSS and HLX FSR 4, and the Game tab can install **HelixSR Scaler** instead of OptiScaler, with every upscaler in its menu (HLX DLSS, HLX FSR 4, AMD's FSR versions, the FSR 4 driver DLLs, XeSS). The build now also downloads AMD's driver package (about 420 MB) for HLX FSR 4's shaders.
 - Compiling HelixSR keeps AMD's `amdxcffx64.dll` (the one its setup downloads for HLX FSR 4) in Custom DLLs when there's none. Custom DLLs: one Choose button per FSR 4 DLL (DirectX 12 and Vulkan); choosing one keeps the other.
 - The Global `OptiScaler.ini` and its resets are gone: a game gets its build's own file (the nightly's or HelixSR Scaler's, so it always has that version's options) with only `OptiDllPath` set (and HLX FSR 4's `FfxDx12SRPath` for HelixSR Scaler); set its other options in Game. The old Global file stays in `~/.local/share/invasor-opti/` unused (it goes when the module is uninstalled with its data).
