@@ -1,12 +1,11 @@
 import { currentGame, defineModule, ui, type ModuleCtx } from "invasor";
 
-// OptiScaler: OptiScaler.ini files, built from the files themselves.
-// Game: the selected game's, plus installing OptiScaler in it (the nightly Global downloaded, or HelixSR
-// Scaler as Global compiled it) and the launch line to copy or apply. Global: the module's own, the one a
-// game gets with the nightly, with two resets, under the OptiScaler nightly the module has downloaded (and a
-// button to get the latest), HelixSR (a button to compile it) and the custom DLLs.
+// OptiScaler: the selected game's OptiScaler.ini, built from the file itself.
+// Game: that file, plus installing OptiScaler in the game (the nightly Global downloaded, or HelixSR
+// Scaler as Global compiled it) and the launch line to copy or apply. Global: the OptiScaler nightly the
+// module has downloaded (and a button to get the latest), HelixSR (a button to compile it) and the custom DLLs.
 // Credits last.
-// Everything sits in a folded "All Configuration" group (in Game, a switch hides the keys still at OptiScaler's
+// Everything sits in a folded "All Configuration" group (a switch hides the keys still at OptiScaler's
 // defaults), then one foldable group per [Section]
 // (X folds the one under the cursor), one control per key: a list when the comments above
 // the key name its values, else a text field. Y shows the key's description (the comments)
@@ -89,13 +88,11 @@ const SAVE_DELAY = 700;
 const sigOf = (...parts: unknown[]) => JSON.stringify(parts);
 const errorText = (e: unknown) => String((e as Error)?.message ?? e);
 
-/** The part of a path worth showing: …/compatdata/… (a game's), or ~/.local/share/… (the Global one). */
+/** The part of a game's path worth showing: …/compatdata/… */
 function shortPath(path: string | null) {
   if (!path) return "";
   const game = path.indexOf("/compatdata/");
-  if (game >= 0) return `…${path.slice(game)}`;
-  const share = path.indexOf("/.local/share/");
-  return share >= 0 ? `~${path.slice(share)}` : path;
+  return game >= 0 ? `…${path.slice(game)}` : path;
 }
 
 /** "v10.0.0-pre1 (2026-10-23)" */
@@ -410,14 +407,14 @@ function installation(ctx: ModuleCtx, key: unknown, loaded: Loaded): HTMLElement
     const dll = () => chosenDll.get(appid) ?? DLLS[0];
     const opti = ui.button({
       label: "Install OptiScaler",
-      hint: loaded.build ? `OptiScaler ${buildName(loaded.build)}, the one downloaded in Global, with the Global OptiScaler.ini` : "",
+      hint: loaded.build ? `OptiScaler ${buildName(loaded.build)}, the one downloaded in Global, with its own OptiScaler.ini` : "",
       onClick: () => void gameAction(ctx, "game_install", { appid, dll: dll() }, "OptiScaler installed"),
     });
     if (!loaded.build) opti.setDisabled(true, "Download OptiScaler in Global first");
     const scaler = ui.button({
       label: "Install HelixSR Scaler",
       hint: loaded.helixsr
-        ? `OptiScaler with HLX DLSS and HLX FSR 4 (HelixSR ${loaded.helixsr.tag}, compiled in Global), and the FSR 4 driver DLLs if they're in Global`
+        ? `OptiScaler with HLX DLSS and HLX FSR 4 (HelixSR ${loaded.helixsr.tag}, compiled in Global), with its own OptiScaler.ini and the FSR 4 driver DLLs if they're in Global`
         : "",
       onClick: () => void gameAction(ctx, "game_install", { appid, dll: dll(), flavor: SCALER }, "HelixSR Scaler installed"),
     });
@@ -805,59 +802,17 @@ class CustomBox {
 
 const customBox = new CustomBox();
 
-const global = new IniPage((ctx) => ctx.call<Loaded>("global_load"), "global_set");
+// The Global tab's element: its three groups, built once per panel (they keep themselves up to date).
+let globalEl: HTMLElement | null = null;
 
-async function resetGlobal(ctx: ModuleCtx, source: "optiscaler" | "invasor", what: string) {
-  if (!(await ui.confirm(`Replace every value of the Global OptiScaler.ini with ${what}?`, { ok: "Reset" }))) return;
-  try {
-    await ctx.call("global_reset", { source });
-    ctx.toast(`Global: ${what}`);
-  } catch (e) {
-    ctx.toast(errorText(e), "error");
-  }
-  void renderGlobal(ctx, true);
-}
-
-// "Reset config", folded until the user opens it (kept while the panel lives).
-let resetOpen = false;
-
-async function renderGlobal(ctx: ModuleCtx, force = false) {
-  const el = global.el;
-  if (!el) return;
-  const got = await global.content(ctx, "global", force);
-  if (!got) return;
-  const { loaded, problem } = got;
-  const parts: HTMLElement[] = [
+function renderGlobal(ctx: ModuleCtx) {
+  if (!globalEl || globalEl.childElementCount) return;
+  globalEl.replaceChildren(
+    ui.info("What the games get: the OptiScaler nightly, HelixSR Scaler and the DLLs you bring. Each game's OptiScaler.ini is set in Game."),
     nightlyBox.element(ctx),
     helixBox.element(ctx),
     customBox.element(ctx),
-    ui.separator(),
-    ui.info("The OptiScaler.ini a game gets when OptiScaler is installed in it (HelixSR Scaler brings its own)."),
-  ];
-  if (problem) parts.push(ui.info(problem));
-  else if (loaded?.state === "ok") {
-    parts.push(ui.info(shortPath(loaded.path)));
-    parts.push(...global.configuration(ctx, loaded, "global", {}, () => void renderGlobal(ctx, true)));
-  }
-  const reset = foldable(
-    "Reset config",
-    [
-      ui.button({
-        label: "Reset to OptiScaler defaults",
-        hint: "The file as this OptiScaler version ships it (every value auto)",
-        onClick: () => void resetGlobal(ctx, "optiscaler", "OptiScaler's defaults"),
-      }),
-      ui.button({
-        label: "Reset to invasor-opti defaults",
-        hint: "The file this module starts with",
-        onClick: () => void resetGlobal(ctx, "invasor", "invasor-opti's defaults"),
-      }),
-    ],
-    resetOpen,
-    (open) => void (resetOpen = open),
   );
-  parts.push(reset);
-  el.replaceChildren(...parts);
 }
 
 export default defineModule({
@@ -874,10 +829,11 @@ export default defineModule({
     {
       label: "Global",
       render(el) {
-        global.el = el;
+        globalEl = el;
       },
       onShow: (ctx) => {
-        void renderGlobal(ctx).then(() => customBox.refresh(ctx)); // its rows are made by renderGlobal
+        renderGlobal(ctx);
+        void customBox.refresh(ctx); // its rows are made by renderGlobal
         void nightlyBox.refresh(ctx);
         helixBox.refresh(ctx);
       },
@@ -898,13 +854,12 @@ export default defineModule({
   onGameChange: (_game, ctx) => void renderGame(ctx),
   destroy: () => {
     game.reset();
-    global.reset();
+    globalEl = null;
     chosenDll.clear();
     installOpen = false;
     nightlyBox.reset();
     helixBox.reset();
     customBox.reset();
     lastFolder = undefined;
-    resetOpen = false;
   },
 });

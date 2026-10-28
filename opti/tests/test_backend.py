@@ -36,7 +36,7 @@ class BackendTest(unittest.TestCase):
 
     def test_each_key_says_its_default(self):
         path = self.prefix() / "OptiScaler.ini"
-        shutil.copy(HERE / "assets" / "OptiScaler.invasor.ini", path)
+        path.write_bytes(FIXTURE.read_bytes().replace(b"UpscalerIndex=auto", b"UpscalerIndex=0", 1))
         keys = {(s["name"], k["key"]): k for s in self.b.load("123")["sections"] for k in s["keys"]}
         k = keys[("FSR", "UpscalerIndex")]
         self.assertEqual((k["value"], k["default"]), ("0", "auto"))  # changed from OptiScaler's
@@ -71,47 +71,18 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(list(path.parent.glob(".OptiScaler.ini.*")), [])  # no temp file left
 
 
-class GlobalTest(unittest.TestCase):
-    def setUp(self):
+class UninstallTest(unittest.TestCase):
+    def test_purge(self):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp)
-        self.b = load_backend()
-        self.b.setup(FakeCtx())
-        self.b.GLOBAL_DIR = tmp / "invasor-opti"
-        self.path = self.b.GLOBAL_DIR / "OptiScaler.ini"
-
-    def test_starts_as_the_module_ini(self):
-        r = self.b.global_load()
-        self.assertEqual(r["state"], "ok")
-        self.assertEqual(self.path.read_bytes(), self.b.DEFAULTS["invasor"].read_bytes())
-        self.assertEqual(self.path.stat().st_mode & 0o777, 0o644)
-
-    def test_set_changes_one_line(self):
-        r = self.b.global_load()
-        self.b.global_set("FSR", "UpscalerIndex", "1", r["mtime"])
-        old = self.b.DEFAULTS["invasor"].read_bytes().splitlines(keepends=True)
-        new = self.path.read_bytes().splitlines(keepends=True)
-        self.assertEqual([(a, b) for a, b in zip(old, new) if a != b], [(b"UpscalerIndex=0\r\n", b"UpscalerIndex=1\r\n")])
-
-    def test_resets(self):
-        r = self.b.global_load()
-        self.b.global_set("FSR", "UpscalerIndex", "2", r["mtime"])
-        for source in ("optiscaler", "invasor"):
-            r = self.b.global_reset(source)
-            self.assertEqual(r["state"], "ok")
-            self.assertEqual(self.path.read_bytes(), self.b.DEFAULTS[source].read_bytes(), source)
-        with self.assertRaises(InvalidArgument):
-            self.b.global_reset("../../etc/passwd")
-
-    def test_uninstall(self):
-        self.b.global_load()
-        self.b.uninstall(FakeCtx(), purge=False)
-        self.assertTrue(self.path.exists())
-        self.b.uninstall(FakeCtx(), purge=True)
-        self.assertFalse(self.b.GLOBAL_DIR.exists())
-
-    def test_the_two_defaults_differ(self):
-        self.assertNotEqual(self.b.DEFAULTS["optiscaler"].read_bytes(), self.b.DEFAULTS["invasor"].read_bytes())
+        b = load_backend()
+        b.setup(FakeCtx())
+        b.GLOBAL_DIR = tmp / "invasor-opti"
+        (b.GLOBAL_DIR / "optiscaler").mkdir(parents=True)
+        b.uninstall(FakeCtx(), purge=False)
+        self.assertTrue(b.GLOBAL_DIR.exists())
+        b.uninstall(FakeCtx(), purge=True)
+        self.assertFalse(b.GLOBAL_DIR.exists())
 
 
 if __name__ == "__main__":

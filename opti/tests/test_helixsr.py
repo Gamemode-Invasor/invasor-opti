@@ -178,7 +178,7 @@ class GameScalerTest(unittest.TestCase):
 
     def keys(self):
         text, _, _ = self.b._read(self.umu / "OptiScaler.ini")
-        return [self.b._find_key(text, s, k)["value"] for s, k, _ in self.b.SCALER_INI]
+        return [self.b._find_key(text, s, k)["value"] for s, k, _ in (*self.b.INSTALL_INI, *self.b.SCALER_INI)]
 
     def test_install(self):
         with self.assertRaisesRegex(Unavailable, "compile HelixSR"):
@@ -191,7 +191,7 @@ class GameScalerTest(unittest.TestCase):
         self.b.custom_set("fsr4", str(self.tmp / "amdxcffx64.dll"))
         r = self.b.game_install("42", "dxgi", SCALER)
         self.assertEqual((r["install"]["flavor"], r["helixsr"]["tag"], r["install"]["extras"]), (SCALER, "v3.1.0", {"fsr4": True}))
-        self.assertEqual(self.keys(), [v for _, _, v in self.b.SCALER_INI])
+        self.assertEqual(self.keys(), [v for _, _, v in (*self.b.INSTALL_INI, *self.b.SCALER_INI)])
         self.assertIn(b"\r\n", (self.umu / "OptiScaler.ini").read_bytes())  # its line ends stay
         text = (self.umu / "OptiScaler.ini").read_text()
         self.assertEqual(self.b._find_key(text, "HelixSR", "Int8")["value"], "auto")  # the package's own file

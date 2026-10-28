@@ -1,12 +1,10 @@
 """OptiScaler: OptiScaler.ini files from Invasor's panel, and OptiScaler itself in games.
 
-Two files: the selected game's, in its Proton prefix, in the folder Wine's OptiScaler hack loads
-it from (install.UMU); and the module's own Global one (GLOBAL_DIR/OptiScaler.ini), the one a game
-gets when OptiScaler (the nightly) is installed in it; HelixSR Scaler brings its own. The Global one
-starts as a copy of assets/OptiScaler.invasor.ini and can be reset to that or to OptiScaler's own
-(assets/OptiScaler.optiscaler.ini).
+The file is the selected game's, in its Proton prefix, in the folder Wine's OptiScaler hack loads
+it from (install.UMU). A game gets its build's own file when OptiScaler is installed in it, with
+only what this module needs set (INSTALL_INI, SCALER_INI).
 
-Next to the Global file, NIGHTLY_NAME holds the latest OptiScaler nightly, downloaded on request
+In GLOBAL_DIR, NIGHTLY_NAME holds the latest OptiScaler nightly, downloaded on request
 in a thread of its own (see nightly.py), HELIXSR_NAME HelixSR Scaler with HelixSR's upscalers, built on
 this device by bin/helixsr-fetch.sh (also in a thread of its own, see helixsr.py), and CUSTOM_NAME the
 DLLs the user brings (see custom.py). install.py puts either OptiScaler in a game, custom.py the DLLs.
@@ -29,19 +27,18 @@ from pathlib import Path
 from . import custom, files, helixsr, ini, install, nightly
 
 ASSETS = Path(__file__).resolve().parent / "assets"
-# What the Global file can be reset to: OptiScaler's own file and the one this module ships.
-DEFAULTS = {"optiscaler": ASSETS / "OptiScaler.optiscaler.ini", "invasor": ASSETS / "OptiScaler.invasor.ini"}
+# OptiScaler's own file (v10.0.0-pre1): a build's when it has none, and its defaults when none is downloaded.
+OPTISCALER_INI = ASSETS / "OptiScaler.optiscaler.ini"
 # Outside the module's folder, which an update replaces.
 GLOBAL_DIR = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "invasor-opti"
 NIGHTLY_NAME = "optiscaler"
 HELIXSR_NAME = "helixsr"
 FLAVORS = ("optiscaler", helixsr.FLAVOR)
-# What HelixSR Scaler's OptiScaler.ini needs in a game: its DLLs from its own folder (else it takes the game's
-# .exe folder, where a game's own FSR, XeSS or no amdxcffx64.dll may be), and HLX FSR 4 as the FidelityFX upscaler.
-SCALER_INI = (
-    ("Libraries", "OptiDllPath", r"c:\windows\system32\umu\OptiScaler"),
-    ("Libraries", "FfxDx12SRPath", r"C:\windows\system32\umu\OptiScaler\amd_fidelityfx_upscaler_dx12.dll"),
-)
+# What a game's new OptiScaler.ini needs: its DLLs from its own folder (else HelixSR Scaler takes the game's .exe
+# folder, where a game's own FSR, XeSS or no amdxcffx64.dll may be); for HelixSR Scaler, HLX FSR 4 as the
+# FidelityFX upscaler too.
+INSTALL_INI = (("Libraries", "OptiDllPath", r"c:\windows\system32\umu\OptiScaler"),)
+SCALER_INI = (("Libraries", "FfxDx12SRPath", r"C:\windows\system32\umu\OptiScaler\amd_fidelityfx_upscaler_dx12.dll"),)
 CUSTOM_NAME = "custom"
 MAX_BYTES = 4 * 1024 * 1024  # OptiScaler's own is ~60 KB: anything this big isn't one
 
@@ -298,7 +295,7 @@ def _optiscaler_defaults(flavor=None):
     flavor), else the one in assets."""
     built = (_helixsr_dir() if flavor == helixsr.FLAVOR else _nightly_dir()) / install.INI
     try:
-        text, _, _ = _read(built if built.is_file() else DEFAULTS["optiscaler"])
+        text, _, _ = _read(built if built.is_file() else OPTISCALER_INI)
     except ctx.Unavailable:
         return {}
     return {(s["name"], k["key"]): k["value"] for s in ini.parse(text) for k in s["keys"]}
@@ -340,24 +337,26 @@ def _flavor_build(flavor):
 
 
 def game_install(appid, dll, flavor="optiscaler"):
-    """Install a build of Global into the game, loaded as <dll>.dll: the nightly ("optiscaler", with the
-    Global OptiScaler.ini), or HelixSR Scaler ("helixsr-scaler", with its own OptiScaler.ini set as SCALER_INI
-    says, and the FSR 4 driver DLLs when they're kept in Global). Set up whole or not at all."""
+    """Install a build of Global into the game, loaded as <dll>.dll: the nightly ("optiscaler") or HelixSR
+    Scaler ("helixsr-scaler"). A game without an OptiScaler.ini gets the build's own with INSTALL_INI set;
+    HelixSR Scaler's always has SCALER_INI and INSTALL_INI set, and it also gets the FSR 4 driver DLLs when
+    they're kept in Global. Set up whole or not at all."""
     if flavor not in FLAVORS:
         raise ctx.InvalidArgument(f"flavor must be one of {', '.join(FLAVORS)}")
     scaler = flavor == helixsr.FLAVOR
-    ini_src = None if scaler else _global_path()  # before the write lock: making it takes the lock too
+    ini_path = _game_umu(appid) / install.INI
+    # A game's own OptiScaler.ini stays as it is; HelixSR Scaler sets aside one without [HelixSR] (install.install).
+    fresh = not ini_path.is_file() or (scaler and not install.has_helixsr_section(ini_path))
     with _build:
         build = _flavor_build(flavor)
         what = f"install {'HelixSR Scaler' if scaler else 'OptiScaler'} as {dll}.dll"
-        r = _in_game(appid, what, lambda umu: install.install(build, umu, ini_src or build / install.INI, dll, ctx.archive.swap_dir))
-    if not scaler:
-        return r
-    umu = _game_umu(appid)
-    ini_path = umu / install.INI
-    try:  # set up whole or not at all: a HelixSR Scaler without its two keys loads the game's own DLLs
-        _apply(ini_path, {(s, k): v for s, k, v in SCALER_INI})
-        if custom.status(_custom_dir())["fsr4"]:
+        ini_src = build / install.INI if (build / install.INI).is_file() else OPTISCALER_INI
+        _in_game(appid, what, lambda umu: install.install(build, umu, ini_src, dll, ctx.archive.swap_dir))
+    umu = ini_path.parent
+    try:  # a HelixSR Scaler without its two keys loads the game's own DLLs
+        if fresh or scaler:
+            _apply(ini_path, {(s, k): v for s, k, v in (*INSTALL_INI, *(SCALER_INI if scaler else ()))})
+        if scaler and custom.status(_custom_dir())["fsr4"]:
             with _write:
                 custom.enable(_custom_dir(), umu, "fsr4")
     except BaseException:
@@ -416,40 +415,6 @@ def game_extra(appid, slot, on):
 
 
 # ---------- Global ----------
-
-def _global_path():
-    """The Global file, made from assets/OptiScaler.invasor.ini the first time."""
-    path = GLOBAL_DIR / install.INI
-    if not path.exists():
-        with _write:
-            if not path.exists():
-                _guarded("make the Global file", lambda: _reset_to(path, "invasor"), ctx.Unavailable)
-    return path
-
-
-def _reset_to(path, source):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _save(path, DEFAULTS[source].read_bytes())
-    ctx.log.info("%s: from %s", path, DEFAULTS[source].name)
-
-
-def global_load():
-    return _load_file(_global_path())
-
-
-def global_set(section, key, value, mtime):
-    return _set_in_file(_global_path(), section, key, value, mtime)
-
-
-def global_reset(source):
-    """Replace the Global file with one of DEFAULTS ("optiscaler" or "invasor"); returns global_load()."""
-    if source not in DEFAULTS:
-        raise ctx.InvalidArgument("source must be optiscaler or invasor")
-    path = _global_path()
-    with _write:
-        _guarded("reset the Global file", lambda: _reset_to(path, source), ctx.Unavailable)
-    return global_load()
-
 
 def _custom_dir():
     return GLOBAL_DIR / CUSTOM_NAME
@@ -737,8 +702,8 @@ def teardown():
 
 
 def uninstall(context, purge):
-    """With purge, the Global file, the downloaded nightly, HelixSR Scaler and the custom DLLs go too (the
-    module's own data)."""
+    """With purge, the downloaded nightly, HelixSR Scaler and the custom DLLs go too (the module's own data,
+    and anything else left in GLOBAL_DIR)."""
     if purge:
         shutil.rmtree(GLOBAL_DIR, ignore_errors=True)
 
@@ -752,9 +717,6 @@ METHODS = {
     "game_set_dll": game_set_dll,
     "game_apply_launch": game_apply_launch,
     "game_extra": game_extra,
-    "global_load": global_load,
-    "global_set": global_set,
-    "global_reset": global_reset,
     "custom_status": custom_status,
     "custom_set": custom_set,
     "custom_remove": custom_remove,
