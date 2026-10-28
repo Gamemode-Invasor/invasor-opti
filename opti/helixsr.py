@@ -5,8 +5,8 @@ HLX FSR 4), kept as the nightly is (see nightly.py), as a game's umu folder lays
     HelixSR/helixsr.dll, HelixSR/helixsr.ini (HLX DLSS)
     MARKER  which build it is, with "flavor": SCALER
 
-The script leaves that in a folder, plus VERSION (its tag) and, when the setup got it, AMD's amdxcffx64.dll (the
-backend takes it out for Custom DLLs first); store() checks the rest and swaps it in at once.
+The script leaves that in a folder, plus VERSION (its tag) and AMD's amdxcffx64.dll and NVIDIA's nvngx_dlss.dll
+when the setup got them (the backend takes them out for the DLLs first); store() checks the rest and swaps it in.
 """
 import json
 from pathlib import Path

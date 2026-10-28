@@ -164,7 +164,7 @@ def install(build, umu, ini, dll, swap):
 def update(build, umu):
     """Put the build's files over the game's: OptiScaler.dll, every file of its folders, and the marker.
     Whatever the build doesn't bring stays: the game's OptiScaler.ini (and HelixSR/helixsr.ini), its DLL name,
-    the custom DLLs and anything the user added to the folders. A DLL name that was a copy of OptiScaler.dll
+    the DLLs turned on and anything the user added to the folders. A DLL name that was a copy of OptiScaler.dll
     becomes a link, so it loads the new one. The build must be the game's flavor."""
     build, umu = Path(build), Path(umu)
     if not (build / MAIN_DLL).is_file():

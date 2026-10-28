@@ -4,6 +4,7 @@ import struct
 MACHINE_X64 = 0x8664
 IMAGE_FILE_DLL = 0x2000
 FIXED_SIGNATURE = struct.pack("<I", 0xFEEF04BD)  # VS_FIXEDFILEINFO
+FIXED_VERSION = struct.pack("<I", 0x00010000)
 
 
 def _string(data, key):
@@ -34,7 +35,8 @@ def info(data):
     if machine != MACHINE_X64:
         raise ValueError("not a 64-bit DLL")
     version = None
-    i = data.find(FIXED_SIGNATURE)
+    # The signature, then the structure's version (1.0): the same 4 bytes can show up in code first (NVIDIA's DLLs).
+    i = data.find(FIXED_SIGNATURE + FIXED_VERSION)
     if 0 <= i <= len(data) - 16:
         ms, ls = struct.unpack_from("<II", data, i + 8)
         version = f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}.{ls & 0xFFFF}"

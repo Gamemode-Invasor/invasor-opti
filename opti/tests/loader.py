@@ -23,6 +23,8 @@ def load_backend():
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
+    # Never the user's own data: a folder of its own that a test may point elsewhere (it's never made here).
+    mod.GLOBAL_DIR = Path(tempfile.gettempdir()) / f"opti-tests-{os.getpid()}-{name}" / "invasor-opti"
     return mod
 
 
@@ -37,7 +39,7 @@ from invasor.schema import InvalidArgument, Unavailable  # noqa: E402
 
 paths.STEAM_ROOT = str(HERE / "no-steam-here")  # never the real Steam: fake_steam points it at a test's own
 paths.MEDIA_GLOBS = ()
-swap_dir = archive.swap_dir  # what the backend passes to install.install and custom.store
+swap_dir = archive.swap_dir  # what the backend passes to install.install and dlls.store
 
 _log = logging.getLogger("opti-test")
 _log.propagate = False  # what the backend logs isn't the tests' output
@@ -69,13 +71,17 @@ class FakeHttp:
 
 
 class FakeSteam:
-    """ctx.steam: no launch options call unless a test sets `options` ({appid: line}); set_launch_options
-    records what it got."""
+    """ctx.steam: a shortcut's launch options from shortcuts.vdf, as the core does; a Steam game's only when a test sets
+    `options` ({appid: line}), else Unavailable (no Steam). set_launch_options records what it got."""
 
     def __init__(self):
         self.options, self.can_set, self.set = None, False, []
 
     def launch_options(self, appid):
+        """As the core does: a shortcut's from shortcuts.vdf, else Steam's answer."""
+        shortcut = paths.shortcuts().get(appid)
+        if shortcut is not None:
+            return shortcut["options"]
         if self.options is None:
             raise Unavailable("no Steam in the tests")
         return self.options.get(appid, "")

@@ -3,7 +3,7 @@ import { currentGame, defineModule, ui, type ModuleCtx } from "invasor";
 // OptiScaler: the selected game's OptiScaler.ini, built from the file itself.
 // Game: that file, plus installing OptiScaler in the game (the nightly Global downloaded, or HelixSR
 // Scaler as Global compiled it) and the launch line to copy or apply. Global: the OptiScaler nightly the
-// module has downloaded (and a button to get the latest), HelixSR (a button to compile it) and the custom DLLs.
+// module has downloaded (and a button to get the latest), HelixSR (a button to compile it) and the AMD/NVIDIA DLLs.
 // Credits last.
 // Everything sits in a folded "All Configuration" group (a switch hides the keys still at OptiScaler's
 // defaults), then one foldable group per [Section]
@@ -29,32 +29,26 @@ interface Loaded {
   install?: Install | null;
   build?: Build | null;
   helixsr?: Build | null;
-  custom?: Record<string, boolean>; // the custom slots set in Global
+  dlls?: Record<string, boolean>; // the DLL slots kept in Global
 }
 
-interface CustomFile {
+interface DllFile {
   name: string;
   product: string | null;
   version: string | null;
 }
 
-/** Each slot: the files the module keeps, or null when it isn't set. */
-type CustomStatus = Record<string, CustomFile[] | null>;
+/** Each slot: the DLL the module keeps, or null when it isn't set. */
+type DllsStatus = Record<string, DllFile | null>;
 
-// DLLs the user brings (kept by the module, turned on per game; HelixSR Scaler gets them when it's installed).
+// AMD's and NVIDIA's DLLs the user brings, one slot each (kept by the module, turned on per game; HelixSR Scaler
+// gets the AMD ones when it's installed, and compiling HelixSR keeps amdxcffx64.dll and nvngx_dlss.dll).
 const SLOTS = [
-  {
-    id: "fsr4",
-    title: "FSR 4 (AMD driver DLLs)",
-    // One button per DLL, each always there: choosing one keeps the other (and takes the other too when it's
-    // next to the one chosen).
-    choose: [
-      { label: "Choose amdxcffx64.dll (DirectX 12)…", hint: "amdxcffx64.dll from AMD's driver (Compiling HelixSR keeps AMD's when there's none)" },
-      { label: "Choose amdvkffx64.dll (Vulkan)…", hint: "amdvkffx64.dll from AMD's driver (for INT8 RDNA2 and INT8 Lite in Vulkan games)" },
-    ],
-    hint: "amdxcffx64.dll (DirectX 12) and amdvkffx64.dll (Vulkan) from AMD's driver",
-    toggle: "FSR 4 driver DLLs",
-  },
+  { id: "amdxcffx64", vendor: "amd", file: "amdxcffx64.dll", title: "AMD FSR 4 (DirectX 12)", hint: "From AMD's driver: FSR 4 in DirectX 12 games (compiling HelixSR keeps AMD's when there's none)" },
+  { id: "amdvkffx64", vendor: "amd", file: "amdvkffx64.dll", title: "AMD FSR 4 (Vulkan)", hint: "From AMD's driver: FSR 4 in Vulkan games (INT8 RDNA2 and INT8 Lite)" },
+  { id: "nvngx_dlss", vendor: "nvidia", file: "nvngx_dlss.dll", title: "NVIDIA DLSS", hint: "NVIDIA's DLSS DLL: games that use DLSS without Streamline (Unreal Engine 4) offer DLSS only with it next to OptiScaler (compiling HelixSR keeps NVIDIA's when there's none)" },
+  { id: "nvngx_dlssd", vendor: "nvidia", file: "nvngx_dlssd.dll", title: "NVIDIA DLSS Ray Reconstruction", hint: "NVIDIA's DLSS Ray Reconstruction DLL" },
+  { id: "nvngx_dlssg", vendor: "nvidia", file: "nvngx_dlssg.dll", title: "NVIDIA DLSS Frame Generation", hint: "NVIDIA's DLSS Frame Generation DLL" },
 ];
 
 const SCALER = "helixsr-scaler"; // the backend's nightly.SCALER
@@ -65,9 +59,9 @@ function flavorBuild(flavor: string | null | undefined, b: Build) {
   return flavor === SCALER ? `HelixSR Scaler (HelixSR ${b.tag})` : `OptiScaler ${buildName(b)}`;
 }
 
-/** "amdxcffx64.dll 2.4.0.4370 · amdvkffx64.dll 2.4.0.4370" */
-function filesText(files: CustomFile[]) {
-  return files.map((f) => [f.name, f.version].filter(Boolean).join(" ")).join(" · ");
+/** "amdxcffx64.dll 2.4.0.4370" */
+function fileText(f: DllFile) {
+  return [f.name, f.version].filter(Boolean).join(" ");
 }
 
 interface Install {
@@ -394,7 +388,7 @@ function installation(ctx: ModuleCtx, key: unknown, loaded: Loaded): HTMLElement
       children.push(
         ui.button({
           label: `Update to ${flavorBuild(inst.flavor, build)}`,
-          hint: "The one in Global. The game keeps its OptiScaler.ini, its DLL name, its custom DLLs and anything you added",
+          hint: "The one in Global. The game keeps its OptiScaler.ini, its DLL name, its DLLs and anything you added",
           onClick: () => void gameAction(ctx, "game_update", { appid }, `${name} updated`),
         }),
       );
@@ -459,13 +453,14 @@ function installation(ctx: ModuleCtx, key: unknown, loaded: Loaded): HTMLElement
   if (inst.installed) {
     for (const slot of SLOTS) {
       const on = !!inst.extras?.[slot.id];
+      const label = `${slot.title} (${slot.file})`;
       const toggle = ui.toggle({
-        label: slot.toggle,
+        label,
         value: on,
-        hint: slot.hint,
-        onChange: (v) => void gameAction(ctx, "game_extra", { appid, slot: slot.id, on: v }, `${slot.toggle}: ${v ? "on" : "off"}`),
+        hint: `${slot.hint}. Copies it into the game's OptiScaler folder`,
+        onChange: (v) => void gameAction(ctx, "game_extra", { appid, slot: slot.id, on: v }, `${slot.title}: ${v ? "on" : "off"}`),
       });
-      if (!on && !loaded.custom?.[slot.id]) toggle.setDisabled(true, "Choose the DLL in Global first (Custom DLLs)");
+      if (!on && !loaded.dlls?.[slot.id]) toggle.setDisabled(true, `Choose ${slot.file} in Global first (DLLs)`);
       children.push(toggle);
     }
   }
@@ -533,7 +528,7 @@ function buildText(check: HelixCheck | null): { label: string; line: string } {
  */
 class NightlyBox {
   el: HTMLElement | null = null;
-  private open = true;
+  private open = false;
   private version: HTMLElement | null = null;
   private problem: HTMLElement | null = null;
   private button: ReturnType<typeof ui.button> | null = null;
@@ -560,7 +555,7 @@ class NightlyBox {
     clearTimeout(this.timer);
     this.el = this.version = this.problem = this.button = null;
     this.last = null;
-    this.open = true;
+    this.open = false;
     this.busy = false;
   }
 
@@ -612,7 +607,7 @@ const nightlyBox = new NightlyBox();
  */
 class HelixBox {
   el: HTMLElement | null = null;
-  private open = true;
+  private open = false;
   private version: HTMLElement | null = null;
   private build: ReturnType<typeof ui.button> | null = null;
   private latest: HTMLElement | null = null;
@@ -644,7 +639,7 @@ class HelixBox {
     clearTimeout(this.timer);
     this.el = this.version = this.build = this.latest = this.problem = null;
     this.installed = this.check = this.error = null;
-    this.open = true;
+    this.open = false;
     this.busy = false;
   }
 
@@ -679,7 +674,7 @@ class HelixBox {
       ctx.toast(s.error ? `HelixSR: ${s.error}` : `HelixSR ${s.installed?.tag ?? ""} compiled`, s.error ? "error" : "ok");
       if (!s.error) {
         void this.refreshCheck(ctx);
-        void customBox.refresh(ctx); // the build may have kept AMD's amdxcffx64.dll there
+        void dllsBox.refresh(ctx); // the build may have kept AMD's and NVIDIA's DLLs there
         void renderGame(ctx, true); // its Install button depends on it
       }
     }
@@ -706,7 +701,7 @@ class HelixBox {
 
   private async startBuild(ctx: ModuleCtx) {
     const ok = await ui.confirm(
-      "Download the latest stable HelixSR and compile it on this device? It takes several minutes. To build it, NVIDIA's DLSS DLL and AMD's driver package (about 420 MB, only its FSR 4 file is read) are downloaded and used once, under their licenses; if Custom DLLs has no amdxcffx64.dll, AMD's one is kept there. The DLLs you get are for this device only: don't share them. It replaces the module's HelixSR Scaler; games that have it keep theirs until you update them.",
+      "Download the latest stable HelixSR and compile it on this device? It takes several minutes. To build it, NVIDIA's DLSS DLL and AMD's driver package (about 420 MB, only its FSR 4 file is read) are downloaded and used once, under their licenses; both are kept in DLLs when it has none of them. The DLLs you get are for this device only: don't share them. It replaces the module's HelixSR Scaler; games that have it keep theirs until you update them.",
       { ok: "Compile" },
     );
     if (!ok) return;
@@ -725,66 +720,146 @@ class HelixBox {
 
 const helixBox = new HelixBox();
 
-/** "Custom DLLs" in Global: one line per slot with what's kept, a Choose… per DLL and Remove. Built once per panel. */
-class CustomBox {
+interface NvidiaStatus {
+  busy: boolean;
+  error: string | null;
+  release: string;
+}
+
+/**
+ * "DLLs (AMD/Nvidia)" in Global: per DLL a line with what's kept, its Choose… and its Remove, and a button that
+ * downloads NVIDIA's three (the download runs in the backend, followed until it ends). Built once per panel.
+ */
+class DllsBox {
   el: HTMLElement | null = null;
   private open = false;
+  private vendorOpen: Record<string, boolean> = {}; // the AMD and NVIDIA groups the user unfolded
   private rows = new Map<string, { text: HTMLElement; remove: ReturnType<typeof ui.button> }>();
+  private nvidia: ReturnType<typeof ui.button> | null = null;
+  private problem: HTMLElement | null = null;
+  private release = "";
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private busy = false;
 
   element(ctx: ModuleCtx) {
     if (this.el) return this.el;
-    const children: HTMLElement[] = [];
+    const byVendor: Record<string, HTMLElement[]> = { amd: [], nvidia: [] };
     for (const slot of SLOTS) {
+      const children = byVendor[slot.vendor];
       const text = ui.info(`${slot.title}: …`);
-      const choose = slot.choose.map((c) =>
-        ui.button({
-          label: c.label,
-          hint: c.hint,
-          onClick: async () => {
-            const path = await pickDll(ctx, c.label);
-            if (path) void this.store(ctx, slot.id, path);
-          },
-        }),
-      );
+      const label = `Choose ${slot.file}…`;
+      const choose = ui.button({
+        label,
+        hint: slot.hint,
+        onClick: async () => {
+          const path = await pickDll(ctx, label);
+          if (path) void this.store(ctx, slot.id, path);
+        },
+      });
       const remove = ui.button({
         label: `Remove ${slot.title}`,
         hint: "The module's copy goes; games that have it keep theirs",
         onClick: () => void this.remove(ctx, slot.id, slot.title),
       });
       this.rows.set(slot.id, { text, remove });
-      children.push(text, ...choose, remove);
+      children.push(text, choose, remove);
     }
-    this.el = foldable("Custom DLLs", children, this.open, (open) => void (this.open = open));
+    this.nvidia = ui.button({
+      label: "Download NVIDIA's DLLs",
+      hint: "nvngx_dlss.dll, nvngx_dlssd.dll and nvngx_dlssg.dll from github.com/NVIDIA/DLSS, each checked",
+      onClick: () => void this.downloadNvidia(ctx),
+    });
+    this.problem = ui.info("");
+    this.problem.hidden = true;
+    byVendor.nvidia.push(ui.separator(), this.nvidia, this.problem);
+    const group = (vendor: string, title: string) =>
+      foldable(title, byVendor[vendor], !!this.vendorOpen[vendor], (open) => void (this.vendorOpen[vendor] = open));
+    const children = [group("amd", "AMD"), group("nvidia", "NVIDIA")];
+    this.el = foldable("DLLs (AMD/Nvidia)", children, this.open, (open) => void (this.open = open));
     return this.el;
   }
 
   reset() {
-    this.el = null;
+    clearTimeout(this.timer);
+    this.el = this.nvidia = this.problem = null;
     this.rows.clear();
     this.open = false;
+    this.vendorOpen = {};
+    this.busy = false;
   }
 
   async refresh(ctx: ModuleCtx) {
     try {
-      this.show(await ctx.call<CustomStatus>("custom_status"));
+      this.show(await ctx.call<DllsStatus>("dlls_status"));
     } catch (e) {
       ctx.toast(errorText(e), "error");
     }
+    void this.refreshNvidia(ctx);
   }
 
-  private show(status: CustomStatus) {
+  private async refreshNvidia(ctx: ModuleCtx) {
+    clearTimeout(this.timer);
+    let s: NvidiaStatus;
+    try {
+      s = await ctx.call<NvidiaStatus>("dlls_nvidia_status");
+    } catch (e) {
+      this.showNvidia(false, errorText(e));
+      return;
+    }
+    const finished = this.busy && !s.busy;
+    this.release = s.release;
+    this.showNvidia(s.busy, s.error);
+    if (finished) {
+      ctx.toast(s.error ? `NVIDIA: ${s.error}` : `NVIDIA's DLSS ${s.release} DLLs kept`, s.error ? "error" : "ok");
+      if (!s.error) {
+        void this.refresh(ctx);
+        void renderGame(ctx, true); // its switches depend on it
+      }
+    }
+    if (s.busy) this.timer = setTimeout(() => void this.refreshNvidia(ctx), POLL);
+  }
+
+  private showNvidia(busy: boolean, error: string | null) {
+    this.busy = busy;
+    if (!this.nvidia || !this.problem) return;
+    this.problem.textContent = error ?? "";
+    this.problem.hidden = !error || busy;
+    const label = this.release ? `Download NVIDIA's DLSS ${this.release} DLLs` : "Download NVIDIA's DLLs";
+    this.nvidia.setLabel(busy ? "Downloading…" : label);
+    this.nvidia.setDisabled(busy, busy ? "Downloading: see the Tasks panel (Select)" : undefined);
+  }
+
+  private async downloadNvidia(ctx: ModuleCtx) {
+    const ok = await ui.confirm(
+      `Download NVIDIA's DLSS ${this.release || ""} DLLs (nvngx_dlss.dll, nvngx_dlssd.dll and nvngx_dlssg.dll, about 107 MB) from NVIDIA's GitHub? They're NVIDIA's, under NVIDIA's DLSS license, and replace the three kept here; games that have them keep theirs.`,
+      { ok: "Download" },
+    );
+    if (!ok) return;
+    try {
+      const r = await ctx.call<{ started: boolean; busy: boolean }>("dlls_nvidia_download");
+      if (r.started) {
+        this.busy = true;
+        ctx.toast("Downloading NVIDIA's DLLs");
+      }
+    } catch (e) {
+      ctx.toast(errorText(e), "error");
+    }
+    void this.refreshNvidia(ctx);
+  }
+
+  private show(status: DllsStatus) {
     for (const slot of SLOTS) {
       const row = this.rows.get(slot.id);
       if (!row) continue;
-      const files = status[slot.id];
-      row.text.textContent = `${slot.title}: ${files ? filesText(files) : "not set"}`;
-      row.remove.style.display = files ? "" : "none";
+      const kept = status[slot.id];
+      row.text.textContent = `${slot.title}: ${kept ? fileText(kept) : "not set"}`;
+      row.remove.style.display = kept ? "" : "none";
     }
   }
 
   private async store(ctx: ModuleCtx, slot: string, path: string) {
     try {
-      this.show(await ctx.call<CustomStatus>("custom_set", { slot, path }));
+      this.show(await ctx.call<DllsStatus>("dlls_set", { slot, path }));
       ctx.toast("Kept");
       void renderGame(ctx, true); // its toggles depend on it
     } catch (e) {
@@ -795,7 +870,7 @@ class CustomBox {
   private async remove(ctx: ModuleCtx, slot: string, title: string) {
     if (!(await ui.confirm(`Remove the module's copy of ${title}? Games that have it keep theirs.`, { ok: "Remove" }))) return;
     try {
-      this.show(await ctx.call<CustomStatus>("custom_remove", { slot }));
+      this.show(await ctx.call<DllsStatus>("dlls_remove", { slot }));
       void renderGame(ctx, true);
     } catch (e) {
       ctx.toast(errorText(e), "error");
@@ -803,7 +878,7 @@ class CustomBox {
   }
 }
 
-const customBox = new CustomBox();
+const dllsBox = new DllsBox();
 
 // The Global tab's element: its three groups, built once per panel (they keep themselves up to date).
 let globalEl: HTMLElement | null = null;
@@ -811,10 +886,10 @@ let globalEl: HTMLElement | null = null;
 function renderGlobal(ctx: ModuleCtx) {
   if (!globalEl || globalEl.childElementCount) return;
   globalEl.replaceChildren(
-    ui.info("What the games get: the OptiScaler nightly, HelixSR Scaler and the DLLs you bring. Each game's OptiScaler.ini is set in Game."),
+    ui.info("What the games get: the OptiScaler nightly, HelixSR Scaler and AMD/NVIDIA DLLs. Each game's OptiScaler.ini is set in Game."),
     nightlyBox.element(ctx),
     helixBox.element(ctx),
-    customBox.element(ctx),
+    dllsBox.element(ctx),
   );
 }
 
@@ -836,7 +911,7 @@ export default defineModule({
       },
       onShow: (ctx) => {
         renderGlobal(ctx);
-        void customBox.refresh(ctx); // its rows are made by renderGlobal
+        void dllsBox.refresh(ctx); // its rows are made by renderGlobal
         void nightlyBox.refresh(ctx);
         helixBox.refresh(ctx);
       },
@@ -862,7 +937,7 @@ export default defineModule({
     installOpen = false;
     nightlyBox.reset();
     helixBox.reset();
-    customBox.reset();
+    dllsBox.reset();
     lastFolder = undefined;
   },
 });

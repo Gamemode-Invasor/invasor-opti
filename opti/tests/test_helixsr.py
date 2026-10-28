@@ -168,10 +168,13 @@ class GameScalerTest(unittest.TestCase):
         with self.assertRaises(InvalidArgument):
             self.b.game_install("42", "dxgi", "other")
         self.b.helixsr.store(make_out(self.tmp / "out"), self.b._helixsr_dir(), swap_dir)
-        (self.tmp / "amdxcffx64.dll").write_bytes(fake_dll("AMD", (2, 4, 0, 4370)))
-        self.b.custom_set("fsr4", str(self.tmp / "amdxcffx64.dll"))
+        for name in ("amdxcffx64.dll", "amdvkffx64.dll", "nvngx_dlss.dll"):
+            (self.tmp / name).write_bytes(fake_dll(name, (1, 0, 0, 0)))
+            self.b.dlls_set(name[:-4], str(self.tmp / name))
         r = self.b.game_install("42", "dxgi", SCALER)
-        self.assertEqual((r["install"]["flavor"], r["helixsr"]["tag"], r["install"]["extras"]), (SCALER, "v3.1.0", {"fsr4": True}))
+        self.assertEqual((r["install"]["flavor"], r["helixsr"]["tag"]), (SCALER, "v3.1.0"))
+        # The AMD DLLs kept in Global go in by themselves; NVIDIA's are the user's choice per game.
+        self.assertEqual([s for s, on in r["install"]["extras"].items() if on], ["amdxcffx64", "amdvkffx64"])
         self.assertEqual(self.keys(), [v for _, _, v in (*self.b.INSTALL_INI, *self.b.SCALER_INI)])
         self.assertIn(b"\r\n", (self.umu / "OptiScaler.ini").read_bytes())  # its line ends stay
         text = (self.umu / "OptiScaler.ini").read_text()
@@ -231,34 +234,37 @@ class HelixBuildTest(unittest.TestCase):
         self.assertEqual((s["busy"], s["error"], s["installed"]["tag"]), (False, None, "v3.1.0"))
         self.assertEqual([p.name for p in self.b.GLOBAL_DIR.iterdir()], ["helixsr"])  # no build folder left
 
-    def amd_script(self, product="AMD from the build"):
-        """The build leaves AMD's file next to HelixSR Scaler, as helixsr-fetch.sh does."""
-        (self.tmp / "made-amd.dll").write_bytes(fake_dll(product, (2, 4, 0, 4370)))
-        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\ncp "{self.tmp}/made-amd.dll" "$OUT/amdxcffx64.dll"\n')
+    def dll_script(self):
+        """The build leaves AMD's and NVIDIA's DLLs next to HelixSR Scaler, as helixsr-fetch.sh does."""
+        (self.tmp / "made-amd.dll").write_bytes(fake_dll("AMD from the build", (2, 4, 0, 4370)))
+        (self.tmp / "made-nv.dll").write_bytes(fake_dll("NVIDIA from the build", (3, 10, 7, 0)))
+        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\ncp "{self.tmp}/made-amd.dll" "$OUT/amdxcffx64.dll"\n'
+                    f'cp "{self.tmp}/made-nv.dll" "$OUT/nvngx_dlss.dll"\n')
 
-    def test_keeps_amds_dll_when_there_is_none(self):
-        self.amd_script()
+    def test_keeps_the_dlls_when_there_are_none(self):
+        self.dll_script()
         self.b.helixsr_build()
         self.assertIsNone(self.wait()["error"])
-        kept = self.b.custom_status()["fsr4"]
-        self.assertEqual([(f["name"], f["product"]) for f in kept], [("amdxcffx64.dll", "AMD from the build")])
-        self.assertFalse((self.b._helixsr_dir() / "amdxcffx64.dll").exists())  # not in HelixSR Scaler's tree
+        kept = self.b.dlls_status()
+        self.assertEqual((kept["amdxcffx64"]["product"], kept["nvngx_dlss"]["product"]), ("AMD from the build", "NVIDIA from the build"))
+        for name in ("amdxcffx64.dll", "nvngx_dlss.dll"):
+            self.assertFalse((self.b._helixsr_dir() / name).exists())  # not in HelixSR Scaler's tree
 
-    def test_a_kept_amd_dll_stays(self):
-        (self.tmp / "mine.dll").write_bytes(fake_dll("mine", (2, 4, 0, 4370)))
-        (self.tmp / "amdxcffx64.dll").write_bytes((self.tmp / "mine.dll").read_bytes())
-        self.b.custom_set("fsr4", str(self.tmp / "amdxcffx64.dll"))
-        self.amd_script()
+    def test_a_kept_dll_stays(self):
+        (self.tmp / "nvngx_dlss.dll").write_bytes(fake_dll("mine", (3, 8, 0, 0)))
+        self.b.dlls_set("nvngx_dlss", str(self.tmp / "nvngx_dlss.dll"))
+        self.dll_script()
         self.b.helixsr_build()
         self.assertIsNone(self.wait()["error"])
-        self.assertEqual(self.b.custom_status()["fsr4"][0]["product"], "mine")
+        kept = self.b.dlls_status()
+        self.assertEqual((kept["nvngx_dlss"]["product"], kept["amdxcffx64"]["product"]), ("mine", "AMD from the build"))
 
-    def test_a_bad_amd_dll_fails_nothing(self):
-        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\necho junk > "$OUT/amdxcffx64.dll"\n')
+    def test_a_bad_dll_fails_nothing(self):
+        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\necho junk > "$OUT/amdxcffx64.dll"\necho junk > "$OUT/nvngx_dlss.dll"\n')
         self.b.helixsr_build()
         s = self.wait()
         self.assertEqual((s["error"], s["installed"]["tag"]), (None, "v3.1.0"))
-        self.assertIsNone(self.b.custom_status()["fsr4"])
+        self.assertEqual(set(self.b.dlls_status().values()), {None})
 
     def test_a_failed_build_keeps_the_last(self):
         self.b.helixsr.store(make_out(self.tmp / "out"), self.b._helixsr_dir(), swap_dir)

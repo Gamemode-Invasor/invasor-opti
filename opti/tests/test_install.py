@@ -182,7 +182,7 @@ class LaunchOptionsTest(unittest.TestCase):
             w("", "kernel32")
 
     def test_launch_options_from_steams_files(self):
-        """Without Steam's answer, the backend reads shortcuts.vdf and localconfig.vdf."""
+        """A shortcut's come from shortcuts.vdf (ctx.steam reads it); without Steam's answer, localconfig.vdf."""
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp)
         b = load_backend()
