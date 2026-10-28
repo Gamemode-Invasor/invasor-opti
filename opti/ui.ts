@@ -1,9 +1,10 @@
 import { currentGame, defineModule, ui, type ModuleCtx } from "invasor";
 
 // OptiScaler: OptiScaler.ini files, built from the files themselves.
-// Game: the selected game's, plus installing OptiScaler in it (the build Global downloaded) and the
-// launch line to copy or apply. Global: the module's own, the one a game gets, with two resets, under the
-// OptiScaler nightly the module has downloaded (and a button to get the latest) and the custom DLLs.
+// Game: the selected game's, plus installing OptiScaler in it (the nightly Global downloaded, or HelixSR
+// Scaler as Global compiled it) and the launch line to copy or apply. Global: the module's own, the one a
+// game gets with the nightly, with two resets, under the OptiScaler nightly the module has downloaded (and a
+// button to get the latest), HelixSR (a button to compile it) and the custom DLLs.
 // Credits last.
 // Everything sits in a folded "All Configuration" group (in Game, a switch hides the keys still at OptiScaler's
 // defaults), then one foldable group per [Section]
@@ -25,9 +26,10 @@ interface Loaded {
   path: string | null;
   mtime: string | null;
   sections: { name: string; keys: Key[] }[];
-  // Game only: OptiScaler in the game's prefix, and the build Global has downloaded.
+  // Game only: OptiScaler in the game's prefix, the nightly Global has downloaded and the HelixSR Scaler it compiled.
   install?: Install | null;
   build?: Build | null;
+  helixsr?: Build | null;
   custom?: Record<string, boolean>; // the custom slots set in Global
 }
 
@@ -40,7 +42,7 @@ interface CustomFile {
 /** Each slot: the files the module keeps, or null when it isn't set. */
 type CustomStatus = Record<string, CustomFile[] | null>;
 
-// DLLs the user brings (kept by the module, turned on per game).
+// DLLs the user brings (kept by the module, turned on per game; HelixSR Scaler gets them when it's installed).
 const SLOTS = [
   {
     id: "fsr4",
@@ -49,14 +51,15 @@ const SLOTS = [
     hint: "amdxcffx64.dll from AMD's driver, and amdvkffx64.dll if it's next to it (for INT8 RDNA2 and INT8 Lite)",
     toggle: "FSR 4 driver DLLs",
   },
-  {
-    id: "helixsr",
-    title: "HelixSR",
-    choose: "Choose helixsr.dll…",
-    hint: "HelixSR's DLL, and helixsr.ini if it's next to it",
-    toggle: "HelixSR",
-  },
 ];
+
+const SCALER = "helixsr-scaler";
+/** What a game's OptiScaler is called, by its flavor. */
+const flavorName = (flavor: string | null | undefined) => (flavor === SCALER ? "HelixSR Scaler" : "OptiScaler");
+/** "HelixSR Scaler (HelixSR v3.1.0)" or "OptiScaler v10.0.0-pre1 (2026-10-23)" */
+function flavorBuild(flavor: string | null | undefined, b: Build) {
+  return flavor === SCALER ? `HelixSR Scaler (HelixSR ${b.tag})` : `OptiScaler ${buildName(b)}`;
+}
 
 /** "amdxcffx64.dll 2.4.0.4370 · amdvkffx64.dll 2.4.0.4370" */
 function filesText(files: CustomFile[]) {
@@ -67,6 +70,7 @@ interface Install {
   installed: boolean;
   version: Build | null;
   dll: string | null;
+  flavor: string | null; // "optiscaler" or "helixsr-scaler" (null: not installed)
   extras?: Record<string, boolean>;
   launch_ok?: boolean | null; // the game's launch options load it as `dll` (null: nothing to tell)
   can_apply?: boolean; // "Apply to the game" can write them (Steam has the call)
@@ -173,7 +177,7 @@ class IniPage {
 
   /** What tells one load from another, for changed(). */
   private sigFor(key: unknown, l: Loaded | null, problem: string | null) {
-    return sigOf(key, l?.state, l?.path, l?.mtime, problem, l?.install, l?.build);
+    return sigOf(key, l?.state, l?.path, l?.mtime, problem, l?.install, l?.build, l?.helixsr);
   }
 
   /** The file, or null when the page already shows it as it is now. */
@@ -375,37 +379,51 @@ function installation(ctx: ModuleCtx, key: unknown, loaded: Loaded): HTMLElement
       );
     }
   } else if (inst.installed) {
-    parts.push(ui.info("OptiScaler is installed, but no DLL name loads it: pick one under Installation."));
+    parts.push(ui.info(`${flavorName(inst.flavor)} is installed, but no DLL name loads it: pick one under Installation.`));
   }
 
   const children: HTMLElement[] = [];
-  let action: ReturnType<typeof ui.button>;
   if (inst.installed) {
-    children.push(ui.info(inst.version ? `Installed: OptiScaler ${buildName(inst.version)}` : "Installed: OptiScaler (put there by hand: version unknown)"));
-    // A newer (or just another) build in Global, or one put there by hand: it can be brought to Global's.
-    if (loaded.build && loaded.build.tag !== inst.version?.tag) {
+    const name = flavorName(inst.flavor);
+    children.push(ui.info(inst.version ? `Installed: ${flavorBuild(inst.flavor, inst.version)}` : `Installed: ${name} (put there by hand: version unknown)`));
+    // A newer (or just another) build of its flavor in Global, or one put there by hand: it can be brought to Global's.
+    const build = inst.flavor === SCALER ? loaded.helixsr : loaded.build;
+    if (build && build.tag !== inst.version?.tag) {
       children.push(
         ui.button({
-          label: `Update to OptiScaler ${buildName(loaded.build)}`,
-          hint: "The one downloaded in Global. The game keeps its OptiScaler.ini, its DLL name, its custom DLLs and anything you added",
-          onClick: () => void gameAction(ctx, "game_update", { appid }, "OptiScaler updated"),
+          label: `Update to ${flavorBuild(inst.flavor, build)}`,
+          hint: "The one in Global. The game keeps its OptiScaler.ini, its DLL name, its custom DLLs and anything you added",
+          onClick: () => void gameAction(ctx, "game_update", { appid }, `${name} updated`),
         }),
       );
     }
-    action = ui.button({
-      label: "Uninstall OptiScaler",
-      hint: "Removes OptiScaler.dll, OptiScaler.ini, the OptiScaler folder and the DLL link",
-      onClick: () => void uninstallGame(ctx, appid),
-    });
+    children.push(
+      ui.button({
+        label: `Uninstall ${name}`,
+        hint: inst.flavor === SCALER
+          ? "Removes OptiScaler.dll, OptiScaler.ini, the OptiScaler, HelixSR and Licenses folders and the DLL link"
+          : "Removes OptiScaler.dll, OptiScaler.ini, the OptiScaler folder and the DLL link",
+        onClick: () => void uninstallGame(ctx, appid, inst.flavor),
+      }),
+    );
   } else {
-    action = ui.button({
+    const dll = () => chosenDll.get(appid) ?? DLLS[0];
+    const opti = ui.button({
       label: "Install OptiScaler",
-      hint: loaded.build ? `OptiScaler ${buildName(loaded.build)}, the one downloaded in Global` : "",
-      onClick: () => void gameAction(ctx, "game_install", { appid, dll: chosenDll.get(appid) ?? DLLS[0] }, "OptiScaler installed"),
+      hint: loaded.build ? `OptiScaler ${buildName(loaded.build)}, the one downloaded in Global, with the Global OptiScaler.ini` : "",
+      onClick: () => void gameAction(ctx, "game_install", { appid, dll: dll() }, "OptiScaler installed"),
     });
-    if (!loaded.build) action.setDisabled(true, "Download OptiScaler in Global first");
+    if (!loaded.build) opti.setDisabled(true, "Download OptiScaler in Global first");
+    const scaler = ui.button({
+      label: "Install HelixSR Scaler",
+      hint: loaded.helixsr
+        ? `OptiScaler with HLX DLSS and HLX FSR 4 (HelixSR ${loaded.helixsr.tag}, compiled in Global), and the FSR 4 driver DLLs if they're in Global`
+        : "",
+      onClick: () => void gameAction(ctx, "game_install", { appid, dll: dll(), flavor: SCALER }, "HelixSR Scaler installed"),
+    });
+    if (!loaded.helixsr) scaler.setDisabled(true, "Compile HelixSR in Global first");
+    children.push(opti, scaler);
   }
-  children.push(action);
   let current = (inst.installed && inst.dll) || chosenDll.get(appid) || DLLS[0];
   let timer: ReturnType<typeof setTimeout> | undefined;
   // Installed: the link is renamed once the value stays put (going through the list with ←→
@@ -473,9 +491,11 @@ async function gameAction(ctx: ModuleCtx, method: string, args: Record<string, u
   void renderGame(ctx, true);
 }
 
-async function uninstallGame(ctx: ModuleCtx, appid: string) {
-  if (!(await ui.confirm("Remove OptiScaler from this game? Its OptiScaler.ini and the whole OptiScaler folder go too (with anything you added there).", { ok: "Uninstall" }))) return;
-  await gameAction(ctx, "game_uninstall", { appid }, "OptiScaler uninstalled");
+async function uninstallGame(ctx: ModuleCtx, appid: string, flavor: string | null) {
+  const name = flavorName(flavor);
+  const folders = flavor === SCALER ? "the whole OptiScaler, HelixSR and Licenses folders go" : "the whole OptiScaler folder goes";
+  if (!(await ui.confirm(`Remove ${name} from this game? Its OptiScaler.ini and ${folders} too (with anything you added there).`, { ok: "Uninstall" }))) return;
+  await gameAction(ctx, "game_uninstall", { appid }, `${name} uninstalled`);
 }
 
 // ---------- Global ----------
@@ -489,6 +509,7 @@ interface NightlyStatus {
 const POLL = 2000;
 
 interface HelixStatus {
+  installed: Build | null;
   busy: boolean;
   error: string | null;
 }
@@ -589,16 +610,17 @@ class NightlyBox {
 const nightlyBox = new NightlyBox();
 
 /**
- * "Custom DLLs" in Global: one line per slot with what's kept, Choose… and Remove; HelixSR can also be
- * downloaded and compiled here (the build runs in the backend, followed until it ends). Kept across rebuilds.
+ * The "HelixSR" group in Global: the HelixSR Scaler compiled (with HLX DLSS and HLX FSR 4) and a button to
+ * compile the latest stable HelixSR (the build runs in the backend, followed until it ends). Kept across rebuilds.
  */
-class CustomBox {
+class HelixBox {
   el: HTMLElement | null = null;
-  private open = false;
-  private rows = new Map<string, { text: HTMLElement; remove: ReturnType<typeof ui.button> }>();
+  private open = true;
+  private version: HTMLElement | null = null;
   private build: ReturnType<typeof ui.button> | null = null;
   private latest: HTMLElement | null = null;
   private problem: HTMLElement | null = null;
+  private installed: Build | null = null;
   private check: HelixCheck | null = null;
   private error: string | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -606,56 +628,30 @@ class CustomBox {
 
   element(ctx: ModuleCtx) {
     if (this.el) return this.el;
-    const children: HTMLElement[] = [];
-    for (const slot of SLOTS) {
-      const text = ui.info(`${slot.title}: …`);
-      const choose = ui.button({
-        label: slot.choose,
-        hint: slot.hint,
-        onClick: async () => {
-          const path = await pickDll(ctx, slot.choose);
-          if (path) void this.store(ctx, slot.id, path);
-        },
-      });
-      const remove = ui.button({
-        label: `Remove ${slot.title}`,
-        hint: "The module's copy goes; games that have it keep theirs",
-        onClick: () => void this.remove(ctx, slot.id, slot.title),
-      });
-      this.rows.set(slot.id, { text, remove });
-      children.push(text, choose, remove);
-      if (slot.id === "helixsr") {
-        this.build = ui.button({
-          label: BUILD_LABEL,
-          hint: "The latest stable HelixSR from github.com/lonewolf0622/HelixSR, built on this device",
-          onClick: () => void this.startBuild(ctx),
-        });
-        this.latest = ui.info("");
-        this.latest.hidden = true;
-        this.problem = ui.info("");
-        this.problem.hidden = true;
-        children.push(this.latest, this.build, this.problem);
-      }
-    }
-    this.el = foldable("Custom DLLs", children, this.open, (open) => void (this.open = open));
+    this.version = ui.info("Looking for the compiled version…");
+    this.build = ui.button({
+      label: BUILD_LABEL,
+      hint: "The latest stable HelixSR from github.com/lonewolf0622/HelixSR, built on this device: HelixSR Scaler with HLX DLSS and HLX FSR 4",
+      onClick: () => void this.startBuild(ctx),
+    });
+    this.latest = ui.info("");
+    this.latest.hidden = true;
+    this.problem = ui.info("");
+    this.problem.hidden = true;
+    this.el = foldable("HelixSR", [this.version, this.latest, this.build, this.problem], this.open, (open) => void (this.open = open));
+    this.showBuild(this.busy, this.error);
     return this.el;
   }
 
   reset() {
     clearTimeout(this.timer);
-    this.el = this.build = this.latest = this.problem = null;
-    this.check = this.error = null;
-    this.rows.clear();
-    this.open = false;
+    this.el = this.version = this.build = this.latest = this.problem = null;
+    this.installed = this.check = this.error = null;
+    this.open = true;
     this.busy = false;
   }
 
-  async refresh(ctx: ModuleCtx) {
-    try {
-      this.show(await ctx.call<CustomStatus>("custom_status"));
-    } catch (e) {
-      ctx.toast(errorText(e), "error");
-    }
+  refresh(ctx: ModuleCtx) {
     void this.refreshBuild(ctx);
     void this.refreshCheck(ctx);
   }
@@ -680,12 +676,13 @@ class CustomBox {
       return;
     }
     const finished = this.busy && !s.busy;
+    this.installed = s.installed;
     this.showBuild(s.busy, s.error);
     if (finished) {
-      ctx.toast(s.error ? `HelixSR: ${s.error}` : "HelixSR built", s.error ? "error" : "ok");
+      ctx.toast(s.error ? `HelixSR: ${s.error}` : `HelixSR ${s.installed?.tag ?? ""} compiled`, s.error ? "error" : "ok");
       if (!s.error) {
-        void this.refresh(ctx);
-        void renderGame(ctx, true); // its toggles depend on it
+        void this.refreshCheck(ctx);
+        void renderGame(ctx, true); // its Install button depends on it
       }
     }
     if (s.busy) this.timer = setTimeout(() => void this.refreshBuild(ctx), POLL);
@@ -694,7 +691,10 @@ class CustomBox {
   private showBuild(busy: boolean, error: string | null) {
     this.busy = busy;
     this.error = error;
-    if (!this.build || !this.problem) return;
+    if (!this.build || !this.problem || !this.version) return;
+    this.version.textContent = this.installed
+      ? `Compiled: HelixSR Scaler (HelixSR ${this.installed.tag})`
+      : "HelixSR isn't compiled yet.";
     this.problem.textContent = error ?? "";
     this.problem.hidden = !error || busy;
     const text = buildText(this.check);
@@ -708,7 +708,7 @@ class CustomBox {
 
   private async startBuild(ctx: ModuleCtx) {
     const ok = await ui.confirm(
-      "Download the latest stable HelixSR and compile it on this device? It takes a few minutes, and to build it NVIDIA's DLSS DLL is downloaded and used once (NVIDIA's license). The DLL you get is for this device only: don't share it. It replaces the module's copy of HelixSR; games that have it keep theirs.",
+      "Download the latest stable HelixSR and compile it on this device? It takes several minutes. To build it, NVIDIA's DLSS DLL and AMD's driver package (about 420 MB, only its FSR 4 file is read) are downloaded and used once, under their licenses. The DLLs you get are for this device only: don't share them. It replaces the module's HelixSR Scaler; games that have it keep theirs until you update them.",
       { ok: "Compile" },
     );
     if (!ok) return;
@@ -722,6 +722,54 @@ class CustomBox {
       ctx.toast(errorText(e), "error");
     }
     void this.refreshBuild(ctx);
+  }
+}
+
+const helixBox = new HelixBox();
+
+/** "Custom DLLs" in Global: one line per slot with what's kept, Choose… and Remove. Kept across rebuilds. */
+class CustomBox {
+  el: HTMLElement | null = null;
+  private open = false;
+  private rows = new Map<string, { text: HTMLElement; remove: ReturnType<typeof ui.button> }>();
+
+  element(ctx: ModuleCtx) {
+    if (this.el) return this.el;
+    const children: HTMLElement[] = [];
+    for (const slot of SLOTS) {
+      const text = ui.info(`${slot.title}: …`);
+      const choose = ui.button({
+        label: slot.choose,
+        hint: slot.hint,
+        onClick: async () => {
+          const path = await pickDll(ctx, slot.choose);
+          if (path) void this.store(ctx, slot.id, path);
+        },
+      });
+      const remove = ui.button({
+        label: `Remove ${slot.title}`,
+        hint: "The module's copy goes; games that have it keep theirs",
+        onClick: () => void this.remove(ctx, slot.id, slot.title),
+      });
+      this.rows.set(slot.id, { text, remove });
+      children.push(text, choose, remove);
+    }
+    this.el = foldable("Custom DLLs", children, this.open, (open) => void (this.open = open));
+    return this.el;
+  }
+
+  reset() {
+    this.el = null;
+    this.rows.clear();
+    this.open = false;
+  }
+
+  async refresh(ctx: ModuleCtx) {
+    try {
+      this.show(await ctx.call<CustomStatus>("custom_status"));
+    } catch (e) {
+      ctx.toast(errorText(e), "error");
+    }
   }
 
   private show(status: CustomStatus) {
@@ -738,7 +786,6 @@ class CustomBox {
     try {
       this.show(await ctx.call<CustomStatus>("custom_set", { slot, path }));
       ctx.toast("Kept");
-      void this.refreshCheck(ctx);
       void renderGame(ctx, true); // its toggles depend on it
     } catch (e) {
       ctx.toast(errorText(e), "error");
@@ -749,7 +796,6 @@ class CustomBox {
     if (!(await ui.confirm(`Remove the module's copy of ${title}? Games that have it keep theirs.`, { ok: "Remove" }))) return;
     try {
       this.show(await ctx.call<CustomStatus>("custom_remove", { slot }));
-      void this.refreshCheck(ctx);
       void renderGame(ctx, true);
     } catch (e) {
       ctx.toast(errorText(e), "error");
@@ -781,7 +827,13 @@ async function renderGlobal(ctx: ModuleCtx, force = false) {
   const got = await global.content(ctx, "global", force);
   if (!got) return;
   const { loaded, problem } = got;
-  const parts: HTMLElement[] = [nightlyBox.element(ctx), customBox.element(ctx), ui.separator(), ui.info("The OptiScaler.ini a game gets when OptiScaler is set up for it.")];
+  const parts: HTMLElement[] = [
+    nightlyBox.element(ctx),
+    helixBox.element(ctx),
+    customBox.element(ctx),
+    ui.separator(),
+    ui.info("The OptiScaler.ini a game gets when OptiScaler is installed in it (HelixSR Scaler brings its own)."),
+  ];
   if (problem) parts.push(ui.info(problem));
   else if (loaded?.state === "ok") {
     parts.push(ui.info(shortPath(loaded.path)));
@@ -827,6 +879,7 @@ export default defineModule({
       onShow: (ctx) => {
         void renderGlobal(ctx).then(() => customBox.refresh(ctx)); // its rows are made by renderGlobal
         void nightlyBox.refresh(ctx);
+        helixBox.refresh(ctx);
       },
     },
     {
@@ -849,6 +902,7 @@ export default defineModule({
     chosenDll.clear();
     installOpen = false;
     nightlyBox.reset();
+    helixBox.reset();
     customBox.reset();
     lastFolder = undefined;
     resetOpen = false;

@@ -40,7 +40,7 @@ class InstallTest(unittest.TestCase):
         self.umu = self.tmp / "pfx/umu"
 
     def test_install_into_nothing(self):
-        self.assertEqual(self.i.state(self.umu), {"installed": False, "version": None, "dll": None})
+        self.assertEqual(self.i.state(self.umu), {"installed": False, "version": None, "dll": None, "flavor": None})
         self.i.install(self.build, self.umu, self.global_ini, "dxgi", swap_dir)
         self.assertEqual(tree(self.umu), {
             MARKER: (self.build / MARKER).read_bytes(),
@@ -72,7 +72,7 @@ class InstallTest(unittest.TestCase):
         (self.umu / "OptiScaler.dll").write_bytes(b"opti")
         (self.umu / "dxgi.dll").symlink_to("OptiScaler.dll")
         (self.umu / "d3d12.dll").symlink_to("OptiScaler.dll")
-        self.assertEqual(self.i.state(self.umu), {"installed": True, "version": None, "dll": "dxgi"})
+        self.assertEqual(self.i.state(self.umu), {"installed": True, "version": None, "dll": "dxgi", "flavor": "optiscaler"})
         self.i.set_dll(self.umu, "dbghelp")
         self.assertEqual(sorted(tree(self.umu)), ["OptiScaler.dll", "dbghelp.dll"])
         self.assertEqual(self.i.state(self.umu)["dll"], "dbghelp")

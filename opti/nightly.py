@@ -69,6 +69,16 @@ def read_marker(folder):
     return {k: data.get(k) for k in MARKER_KEYS}
 
 
+def flavor(folder):
+    """What MARKER in folder says it is: "helixsr-scaler" (see helixsr.py), else "optiscaler" (a nightly, one
+    without a marker or one from before there was a flavor)."""
+    try:
+        data = json.loads((Path(folder) / MARKER).read_text())
+    except (OSError, ValueError):
+        return "optiscaler"
+    return "helixsr-scaler" if isinstance(data, dict) and data.get("flavor") == "helixsr-scaler" else "optiscaler"
+
+
 def update(folder, http, archive, task=None, stop=None, swap_lock=None):
     """Make folder hold the latest nightly (http: ctx.http, archive: ctx.archive, task: the ctx.task
     that shows it, or None). Returns (release, True) if it was downloaded, or (release, False) if

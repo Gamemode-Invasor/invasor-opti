@@ -1,5 +1,5 @@
 """DLLs the user brings, which the module can't ship: AMD's driver FidelityFX (FSR 4 from the driver,
-INT8 and INT8 Lite) and HelixSR.
+INT8 and INT8 Lite).
 
 The module keeps a copy of each in its own folder (one sub-folder per slot, with INFO saying what each
 file is), so a game doesn't depend on where the original was. Turned on for a game, they're copied into
@@ -18,22 +18,10 @@ from .nightly import MAIN_DLL
 INFO = "info.json"
 MAX_SIZE = 300 * 1024 * 1024  # amdxcffx64.dll is ~85 MB
 
-# A slot, as its files are named in the game's OptiScaler folder (the first is the DLL the user picks; the
-# others are taken from the same folder when they're there):
-# - any_name: the picked DLL may have any name (else it must be one of files);
-# - keep: files the game keeps when the slot is turned on again (its own settings);
-# - extra: files the slot leaves in the game, removed with it;
-# - ini: (section, key, value) the game's OptiScaler.ini needs while the slot is on.
+# A slot, as its files are named in the game's OptiScaler folder: the user picks one of them, the others are
+# taken from the same folder when they're there.
 SLOTS = {
-    "fsr4": {"files": ("amdxcffx64.dll", "amdvkffx64.dll"), "any_name": False},
-    "helixsr": {
-        "files": ("helixsr.dll", "helixsr.ini"),
-        "any_name": True,
-        "keep": ("helixsr.ini",),
-        "extra": ("helixsr.log",),
-        # HelixSR as OptiScaler's FidelityFX upscaler: FSR 4 and the older ones stay, HelixSR is one more.
-        "ini": ("Libraries", "FfxDx12SRPath", r"C:\windows\system32\umu\OptiScaler\helixsr.dll"),
-    },
+    "fsr4": {"files": ("amdxcffx64.dll", "amdvkffx64.dll")},
 }
 
 
@@ -69,11 +57,7 @@ def _sources(slot, path):
     if not path.is_absolute() or not path.is_file():
         raise ValueError("path must be an existing file")
     picked = path.name.lower()
-    if s["any_name"]:
-        if not picked.endswith(".dll"):
-            raise Error("choose a .dll file")
-        picked = s["files"][0]
-    elif picked not in s["files"]:
+    if picked not in s["files"]:
         raise Error(f"choose {' or '.join(s['files'])}")
     found = {name: path if name == picked else _sibling(path.parent, name) for name in s["files"]}
     return {name: src for name, src in found.items() if src}
@@ -134,7 +118,7 @@ def game_state(umu):
 
 
 def enable(folder, umu, slot):
-    """Copy the slot's files into the game (the game keeps its own "keep" files)."""
+    """Copy the slot's files into the game."""
     s = _slot(slot)
     src = Path(folder) / slot
     names = [n for n in s["files"] if (src / n).is_file()]
@@ -145,15 +129,14 @@ def enable(folder, umu, slot):
     game = Path(umu) / FOLDER
     game.mkdir(exist_ok=True)
     for name in names:
-        if name not in s.get("keep", ()) or not (game / name).exists():
-            copy_file(src / name, game / name)
+        copy_file(src / name, game / name)
 
 
 def disable(umu, slot):
-    """Remove the slot's files (and its "extra" ones) from the game."""
+    """Remove the slot's files from the game."""
     s = _slot(slot)
     game = Path(umu) / FOLDER
-    for name in (*s["files"], *s.get("extra", ())):
+    for name in s["files"]:
         p = game / name
         if p.is_file() or p.is_symlink():
             p.unlink()
