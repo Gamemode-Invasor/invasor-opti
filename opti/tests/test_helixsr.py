@@ -1,12 +1,11 @@
 import json
-import os
 import shutil
 import tempfile
 import types
 import unittest
 from pathlib import Path
 
-from tests.loader import FakeCtx, InvalidArgument, Unavailable, fake_steam, load_backend, submodule, swap_dir
+from tests.loader import FakeCtx, InvalidArgument, Unavailable, fake_dll, fake_game, load_backend, submodule, swap_dir, tree
 
 MARKER = ".invasor-opti.version"
 SCALER = "helixsr-scaler"
@@ -80,15 +79,6 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(self.n.flavor(self.tmp), "optiscaler")
         (self.tmp / MARKER).write_text("not json")
         self.assertEqual(self.n.flavor(self.tmp), "optiscaler")
-
-
-def tree(folder):
-    """{relative path: link target, "dir" or file bytes}."""
-    out = {}
-    for p in sorted(Path(folder).rglob("*")):
-        rel = str(p.relative_to(folder))
-        out[rel] = ("-> " + os.readlink(p)) if p.is_symlink() else "dir" if p.is_dir() else p.read_bytes()
-    return out
 
 
 class ScalerInstallTest(unittest.TestCase):
@@ -165,15 +155,7 @@ class GameScalerTest(unittest.TestCase):
     """The backend: HelixSR Scaler in a game, with its two ini keys and the FSR 4 driver DLLs."""
 
     def setUp(self):
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, tmp)
-        steam = tmp / "Steam"
-        (steam / "steamapps/compatdata/42/pfx/drive_c").mkdir(parents=True)
-        self.umu = steam / "steamapps/compatdata/42/pfx/drive_c/windows/system32/umu"
-        self.b = load_backend()
-        self.b.setup(FakeCtx())
-        self.b.GLOBAL_DIR = tmp / "invasor-opti"
-        fake_steam(steam)
+        self.b, tmp, self.umu = fake_game(self)
         self.tmp = tmp
 
     def keys(self):
@@ -186,7 +168,6 @@ class GameScalerTest(unittest.TestCase):
         with self.assertRaises(InvalidArgument):
             self.b.game_install("42", "dxgi", "other")
         self.b.helixsr.store(make_out(self.tmp / "out"), self.b._helixsr_dir(), swap_dir)
-        from tests.test_custom import fake_dll
         (self.tmp / "amdxcffx64.dll").write_bytes(fake_dll("AMD", (2, 4, 0, 4370)))
         self.b.custom_set("fsr4", str(self.tmp / "amdxcffx64.dll"))
         r = self.b.game_install("42", "dxgi", SCALER)
@@ -249,6 +230,35 @@ class HelixBuildTest(unittest.TestCase):
         s = self.wait()
         self.assertEqual((s["busy"], s["error"], s["installed"]["tag"]), (False, None, "v3.1.0"))
         self.assertEqual([p.name for p in self.b.GLOBAL_DIR.iterdir()], ["helixsr"])  # no build folder left
+
+    def amd_script(self, product="AMD from the build"):
+        """The build leaves AMD's file next to HelixSR Scaler, as helixsr-fetch.sh does."""
+        (self.tmp / "made-amd.dll").write_bytes(fake_dll(product, (2, 4, 0, 4370)))
+        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\ncp "{self.tmp}/made-amd.dll" "$OUT/amdxcffx64.dll"\n')
+
+    def test_keeps_amds_dll_when_there_is_none(self):
+        self.amd_script()
+        self.b.helixsr_build()
+        self.assertIsNone(self.wait()["error"])
+        kept = self.b.custom_status()["fsr4"]
+        self.assertEqual([(f["name"], f["product"]) for f in kept], [("amdxcffx64.dll", "AMD from the build")])
+        self.assertFalse((self.b._helixsr_dir() / "amdxcffx64.dll").exists())  # not in HelixSR Scaler's tree
+
+    def test_a_kept_amd_dll_stays(self):
+        (self.tmp / "mine.dll").write_bytes(fake_dll("mine", (2, 4, 0, 4370)))
+        (self.tmp / "amdxcffx64.dll").write_bytes((self.tmp / "mine.dll").read_bytes())
+        self.b.custom_set("fsr4", str(self.tmp / "amdxcffx64.dll"))
+        self.amd_script()
+        self.b.helixsr_build()
+        self.assertIsNone(self.wait()["error"])
+        self.assertEqual(self.b.custom_status()["fsr4"][0]["product"], "mine")
+
+    def test_a_bad_amd_dll_fails_nothing(self):
+        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\necho junk > "$OUT/amdxcffx64.dll"\n')
+        self.b.helixsr_build()
+        s = self.wait()
+        self.assertEqual((s["error"], s["installed"]["tag"]), (None, "v3.1.0"))
+        self.assertIsNone(self.b.custom_status()["fsr4"])
 
     def test_a_failed_build_keeps_the_last(self):
         self.b.helixsr.store(make_out(self.tmp / "out"), self.b._helixsr_dir(), swap_dir)

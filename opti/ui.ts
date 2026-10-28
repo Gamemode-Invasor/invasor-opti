@@ -46,13 +46,18 @@ const SLOTS = [
   {
     id: "fsr4",
     title: "FSR 4 (AMD driver DLLs)",
-    choose: "Choose amdxcffx64.dll…",
-    hint: "amdxcffx64.dll from AMD's driver, and amdvkffx64.dll if it's next to it (for INT8 RDNA2 and INT8 Lite)",
+    // One button per DLL, each always there: choosing one keeps the other (and takes the other too when it's
+    // next to the one chosen).
+    choose: [
+      { label: "Choose amdxcffx64.dll (DirectX 12)…", hint: "amdxcffx64.dll from AMD's driver (Compiling HelixSR keeps AMD's when there's none)" },
+      { label: "Choose amdvkffx64.dll (Vulkan)…", hint: "amdvkffx64.dll from AMD's driver (for INT8 RDNA2 and INT8 Lite in Vulkan games)" },
+    ],
+    hint: "amdxcffx64.dll (DirectX 12) and amdvkffx64.dll (Vulkan) from AMD's driver",
     toggle: "FSR 4 driver DLLs",
   },
 ];
 
-const SCALER = "helixsr-scaler";
+const SCALER = "helixsr-scaler"; // the backend's nightly.SCALER
 /** What a game's OptiScaler is called, by its flavor. */
 const flavorName = (flavor: string | null | undefined) => (flavor === SCALER ? "HelixSR Scaler" : "OptiScaler");
 /** "HelixSR Scaler (HelixSR v3.1.0)" or "OptiScaler v10.0.0-pre1 (2026-10-23)" */
@@ -134,7 +139,7 @@ function summary(description: string) {
 }
 
 /**
- * One page that edits one file: how it loads and writes it, and what it remembers while the
+ * The page that edits the game's file: how it loads and writes it, and what it remembers while the
  * panel lives (which groups are open, the file's mtime, the queue of writes).
  */
 class IniPage {
@@ -497,19 +502,14 @@ async function uninstallGame(ctx: ModuleCtx, appid: string, flavor: string | nul
 
 // ---------- Global ----------
 
-interface NightlyStatus {
+/** nightly_status and helixsr_status: the build Global has, whether a download or build runs, why the last one failed. */
+interface BuildStatus {
   installed: Build | null;
   busy: boolean;
   error: string | null;
 }
 
 const POLL = 2000;
-
-interface HelixStatus {
-  installed: Build | null;
-  busy: boolean;
-  error: string | null;
-}
 
 interface HelixCheck {
   installed: string | null;
@@ -529,7 +529,7 @@ function buildText(check: HelixCheck | null): { label: string; line: string } {
 
 /**
  * The "OptiScaler" group at the top of Global: the nightly downloaded and a button to get the
- * latest. Built once per panel and kept across the page's rebuilds: it only changes its own text.
+ * latest. Built once per panel: it only changes its own text.
  */
 class NightlyBox {
   el: HTMLElement | null = null;
@@ -566,9 +566,9 @@ class NightlyBox {
 
   async refresh(ctx: ModuleCtx) {
     clearTimeout(this.timer);
-    let s: NightlyStatus;
+    let s: BuildStatus;
     try {
-      s = await ctx.call<NightlyStatus>("nightly_status");
+      s = await ctx.call<BuildStatus>("nightly_status");
     } catch (e) {
       this.show(null, false, errorText(e));
       return;
@@ -608,7 +608,7 @@ const nightlyBox = new NightlyBox();
 
 /**
  * The "HelixSR" group in Global: the HelixSR Scaler compiled (with HLX DLSS and HLX FSR 4) and a button to
- * compile the latest stable HelixSR (the build runs in the backend, followed until it ends). Kept across rebuilds.
+ * compile the latest stable HelixSR (the build runs in the backend, followed until it ends). Built once per panel.
  */
 class HelixBox {
   el: HTMLElement | null = null;
@@ -665,9 +665,9 @@ class HelixBox {
 
   private async refreshBuild(ctx: ModuleCtx) {
     clearTimeout(this.timer);
-    let s: HelixStatus;
+    let s: BuildStatus;
     try {
-      s = await ctx.call<HelixStatus>("helixsr_status");
+      s = await ctx.call<BuildStatus>("helixsr_status");
     } catch (e) {
       this.showBuild(false, errorText(e));
       return;
@@ -679,6 +679,7 @@ class HelixBox {
       ctx.toast(s.error ? `HelixSR: ${s.error}` : `HelixSR ${s.installed?.tag ?? ""} compiled`, s.error ? "error" : "ok");
       if (!s.error) {
         void this.refreshCheck(ctx);
+        void customBox.refresh(ctx); // the build may have kept AMD's amdxcffx64.dll there
         void renderGame(ctx, true); // its Install button depends on it
       }
     }
@@ -705,7 +706,7 @@ class HelixBox {
 
   private async startBuild(ctx: ModuleCtx) {
     const ok = await ui.confirm(
-      "Download the latest stable HelixSR and compile it on this device? It takes several minutes. To build it, NVIDIA's DLSS DLL and AMD's driver package (about 420 MB, only its FSR 4 file is read) are downloaded and used once, under their licenses. The DLLs you get are for this device only: don't share them. It replaces the module's HelixSR Scaler; games that have it keep theirs until you update them.",
+      "Download the latest stable HelixSR and compile it on this device? It takes several minutes. To build it, NVIDIA's DLSS DLL and AMD's driver package (about 420 MB, only its FSR 4 file is read) are downloaded and used once, under their licenses; if Custom DLLs has no amdxcffx64.dll, AMD's one is kept there. The DLLs you get are for this device only: don't share them. It replaces the module's HelixSR Scaler; games that have it keep theirs until you update them.",
       { ok: "Compile" },
     );
     if (!ok) return;
@@ -724,7 +725,7 @@ class HelixBox {
 
 const helixBox = new HelixBox();
 
-/** "Custom DLLs" in Global: one line per slot with what's kept, Choose… and Remove. Kept across rebuilds. */
+/** "Custom DLLs" in Global: one line per slot with what's kept, a Choose… per DLL and Remove. Built once per panel. */
 class CustomBox {
   el: HTMLElement | null = null;
   private open = false;
@@ -735,21 +736,23 @@ class CustomBox {
     const children: HTMLElement[] = [];
     for (const slot of SLOTS) {
       const text = ui.info(`${slot.title}: …`);
-      const choose = ui.button({
-        label: slot.choose,
-        hint: slot.hint,
-        onClick: async () => {
-          const path = await pickDll(ctx, slot.choose);
-          if (path) void this.store(ctx, slot.id, path);
-        },
-      });
+      const choose = slot.choose.map((c) =>
+        ui.button({
+          label: c.label,
+          hint: c.hint,
+          onClick: async () => {
+            const path = await pickDll(ctx, c.label);
+            if (path) void this.store(ctx, slot.id, path);
+          },
+        }),
+      );
       const remove = ui.button({
         label: `Remove ${slot.title}`,
         hint: "The module's copy goes; games that have it keep theirs",
         onClick: () => void this.remove(ctx, slot.id, slot.title),
       });
       this.rows.set(slot.id, { text, remove });
-      children.push(text, choose, remove);
+      children.push(text, ...choose, remove);
     }
     this.el = foldable("Custom DLLs", children, this.open, (open) => void (this.open = open));
     return this.el;
@@ -846,7 +849,7 @@ export default defineModule({
           ui.separator(),
           ui.info("Thanks to OptiScaler (github.com/optiscaler/OptiScaler) and every one of its contributors, and to HelixSR (github.com/lonewolf0622/HelixSR). Each keeps its own license."),
           ui.separator(),
-          ui.info("This module is not affiliated with OptiScaler or HelixSR. Please don't report problems with this module to them."),
+          ui.info("OptiHLX is not affiliated with OptiScaler or HelixSR. Please don't report problems with this module to them."),
         );
       },
     },

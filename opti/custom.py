@@ -63,14 +63,27 @@ def _sources(slot, path):
     return {name: src for name, src in found.items() if src}
 
 
+def _info(d):
+    """INFO of a kept slot, {} when there's none (or it's unreadable)."""
+    try:
+        info = json.loads((d / INFO).read_text())
+    except (OSError, ValueError):
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
 def store(folder, slot, path, swap):
-    """Keep a copy of the slot's files, from the one the user picked (path). Replaces the slot whole,
-    with swap(new, target) (ctx.archive.swap_dir)."""
+    """Keep a copy of the file the user picked (path), and of its siblings in the same folder; the slot's other
+    files already kept stay. The slot is replaced whole, with swap(new, target) (ctx.archive.swap_dir)."""
     files = _sources(slot, path)
-    info = {}
-    for name, src in files.items():
-        info[name] = _dll_info(src) if name.endswith(".dll") else {"product": None, "version": None}
+    info = {name: _dll_info(src) for name, src in files.items()}
     folder = Path(folder)
+    kept = folder / slot
+    old = _info(kept)
+    for name in _slot(slot)["files"]:
+        if name not in files and (kept / name).is_file():
+            files[name] = kept / name
+            info[name] = old.get(name) if isinstance(old.get(name), dict) else _dll_info(kept / name)
     folder.mkdir(parents=True, exist_ok=True)
     for old in folder.glob(f".{slot}.*"):  # left by a crash
         shutil.rmtree(old, ignore_errors=True)
@@ -86,6 +99,11 @@ def store(folder, slot, path, swap):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def has(folder, slot, name):
+    """True if the slot keeps a file of that name."""
+    return name in _slot(slot)["files"] and (Path(folder) / slot / name).is_file()
+
+
 def remove(folder, slot):
     _slot(slot)
     shutil.rmtree(Path(folder) / slot, ignore_errors=True)
@@ -96,25 +114,20 @@ def status(folder):
     out = {}
     for slot, s in SLOTS.items():
         d = Path(folder) / slot
-        try:
-            info = json.loads((d / INFO).read_text())
-        except (OSError, ValueError):
-            info = {}
-        if not isinstance(info, dict):
-            info = {}
+        info = _info(d)
         files = []
         for n in s["files"]:
             if (d / n).is_file():
                 i = info.get(n) if isinstance(info.get(n), dict) else {}
                 files.append({"name": n, "product": i.get("product"), "version": i.get("version")})
-        out[slot] = files if any(f["name"].endswith(".dll") for f in files) else None
+        out[slot] = files or None
     return out
 
 
 def game_state(umu):
     """{slot: on} for a game: a slot is on when any of its DLLs is in the game's OptiScaler folder."""
     game = Path(umu) / FOLDER
-    return {slot: any((game / n).is_file() for n in s["files"] if n.endswith(".dll")) for slot, s in SLOTS.items()}
+    return {slot: any((game / n).is_file() for n in s["files"]) for slot, s in SLOTS.items()}
 
 
 def enable(folder, umu, slot):

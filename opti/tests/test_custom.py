@@ -1,29 +1,10 @@
 import json
 import shutil
-import struct
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
-from tests.loader import FakeCtx, InvalidArgument, Unavailable, fake_steam, load_backend, submodule, swap_dir
-
-
-def fake_dll(product="HelixSR", version=(2, 0, 0, 0), machine=0x8664, dll=True):
-    """The few bytes pe.info reads: MZ header, PE signature and machine, a version resource."""
-    head = bytearray(b"MZ" + b"\0" * 0x3E)
-    struct.pack_into("<I", head, 0x3C, 0x40)
-    # COFF header: machine, then characteristics (IMAGE_FILE_DLL unless it's an EXE) at its byte 18.
-    head += b"PE\0\0" + struct.pack("<H", machine) + b"\0" * 16 + struct.pack("<H", 0x2000 if dll else 0x0002)
-    res = b""
-    if version:
-        a, b, c, d = version
-        res += struct.pack("<IIII", 0xFEEF04BD, 0x10000, (a << 16) | b, (c << 16) | d)
-    if product:
-        key = "ProductName".encode("utf-16-le") + b"\0\0"
-        pad = -(len(head) + len(res) + len(key)) % 4
-        res += key + b"\0" * pad + product.encode("utf-16-le") + b"\0\0"
-    return bytes(head + res)
+from tests.loader import InvalidArgument, Unavailable, fake_dll, fake_game, load_backend, submodule, swap_dir
 
 
 class PeTest(unittest.TestCase):
@@ -56,6 +37,24 @@ class CustomTest(unittest.TestCase):
         self.umu = self.tmp / "umu"
         (self.umu / "OptiScaler").mkdir(parents=True)
         (self.umu / "OptiScaler.dll").write_bytes(b"opti")
+
+    def test_each_dll_on_its_own(self):
+        """Choosing one DLL keeps the other one kept; one chosen with its sibling next to it replaces both."""
+        dx, vk = self.tmp / "dx", self.tmp / "vk"
+        dx.mkdir(), vk.mkdir()
+        (dx / "amdxcffx64.dll").write_bytes(fake_dll("AMD DX", (2, 4, 0, 4370)))
+        (vk / "amdvkffx64.dll").write_bytes(fake_dll("AMD VK", (2, 5, 0, 1)))
+        self.c.store(self.kept, "fsr4", str(dx / "amdxcffx64.dll"), swap_dir)
+        self.c.store(self.kept, "fsr4", str(vk / "amdvkffx64.dll"), swap_dir)
+        s = self.c.status(self.kept)["fsr4"]
+        self.assertEqual([(f["name"], f["product"], f["version"]) for f in s],
+                         [("amdxcffx64.dll", "AMD DX", "2.4.0.4370"), ("amdvkffx64.dll", "AMD VK", "2.5.0.1")])
+        self.assertTrue(self.c.has(self.kept, "fsr4", "amdxcffx64.dll"))
+        (self.src / "amdxcffx64.dll").write_bytes(fake_dll("AMD new", (2, 6, 0, 0)))
+        (self.src / "amdvkffx64.dll").write_bytes(fake_dll("AMD VK new", (2, 6, 0, 0)))
+        self.c.store(self.kept, "fsr4", str(self.src / "amdxcffx64.dll"), swap_dir)
+        self.assertEqual([f["product"] for f in self.c.status(self.kept)["fsr4"]], ["AMD new", "AMD VK new"])
+        self.assertFalse(self.c.has(self.kept, "fsr4", "other.dll"))
 
     def test_fsr4_takes_its_sibling(self):
         (self.src / "AMDXCFFX64.DLL").write_bytes(fake_dll("AMD", (2, 4, 0, 4370)))
@@ -118,15 +117,7 @@ class GameExtraTest(unittest.TestCase):
     """The backend: the FSR 4 driver DLLs turned on and off in a game."""
 
     def setUp(self):
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, tmp)
-        steam = tmp / "Steam"
-        (steam / "steamapps/compatdata/42/pfx/drive_c").mkdir(parents=True)
-        self.umu = steam / "steamapps/compatdata/42/pfx/drive_c/windows/system32/umu"
-        self.b = load_backend()
-        self.b.setup(FakeCtx())
-        self.b.GLOBAL_DIR = tmp / "invasor-opti"
-        fake_steam(steam)
+        self.b, tmp, self.umu = fake_game(self)
         build = self.b.GLOBAL_DIR / "optiscaler"
         (build / "OptiScaler").mkdir(parents=True)
         (build / "OptiScaler.dll").write_bytes(b"opti")

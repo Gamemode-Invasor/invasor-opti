@@ -23,6 +23,9 @@ DOWNLOADS = "https://github.com/optiscaler/OptiScaler-nightly/releases/download/
 MARKER = ".invasor-opti.version"
 MARKER_KEYS = ("tag", "version", "date", "asset", "sha256")
 MAIN_DLL = "OptiScaler.dll"
+# What MARKER says a build is ("flavor"): OptiScaler's nightly, or HelixSR Scaler (see helixsr.py).
+OPTISCALER = "optiscaler"
+SCALER = "helixsr-scaler"
 ASSET = re.compile(r"^OptiScaler_(v[^_]+)_(\d{8})\.7z$")  # OptiScaler_v10.0.0-pre1_20261023.7z
 MAX_SIZE = 512 << 20  # a build is ~57 MB
 
@@ -57,26 +60,29 @@ def latest(http):
     return pick(releases[0])
 
 
-def read_marker(folder):
-    """MARKER in folder (a downloaded build, or a game's umu folder), or None if there is none (or it's
-    unreadable)."""
+def _marker_data(folder):
+    """MARKER in folder as JSON, or None (none, unreadable, not an object)."""
     try:
         data = json.loads((Path(folder) / MARKER).read_text())
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or not isinstance(data.get("tag"), str):
+    return data if isinstance(data, dict) else None
+
+
+def read_marker(folder):
+    """MARKER in folder (a downloaded build, or a game's umu folder), or None if there is none (or it's
+    unreadable)."""
+    data = _marker_data(folder)
+    if data is None or not isinstance(data.get("tag"), str):
         return None
     return {k: data.get(k) for k in MARKER_KEYS}
 
 
 def flavor(folder):
-    """What MARKER in folder says it is: "helixsr-scaler" (see helixsr.py), else "optiscaler" (a nightly, one
-    without a marker or one from before there was a flavor)."""
-    try:
-        data = json.loads((Path(folder) / MARKER).read_text())
-    except (OSError, ValueError):
-        return "optiscaler"
-    return "helixsr-scaler" if isinstance(data, dict) and data.get("flavor") == "helixsr-scaler" else "optiscaler"
+    """What MARKER in folder says it is: SCALER, else OPTISCALER (a nightly, one without a marker or one from
+    before there was a flavor)."""
+    data = _marker_data(folder)
+    return SCALER if data and data.get("flavor") == SCALER else OPTISCALER
 
 
 def update(folder, http, archive, task=None, stop=None, swap_lock=None):

@@ -3,17 +3,17 @@ HLX FSR 4), kept as the nightly is (see nightly.py), as a game's umu folder lays
 
     OptiScaler.dll, OptiScaler.ini, OptiScaler/ (HLX FSR 4 with AMD's FSR next to it), Licenses/
     HelixSR/helixsr.dll, HelixSR/helixsr.ini (HLX DLSS)
-    MARKER  which build it is, with "flavor": FLAVOR
+    MARKER  which build it is, with "flavor": SCALER
 
-The script leaves that in a folder (plus VERSION, its tag); store() checks it and swaps it in at once.
+The script leaves that in a folder, plus VERSION (its tag) and, when the setup got it, AMD's amdxcffx64.dll (the
+backend takes it out for Custom DLLs first); store() checks the rest and swaps it in at once.
 """
 import json
 from pathlib import Path
 
 from .files import Error
-from .nightly import MAIN_DLL, MARKER, MARKER_KEYS
+from .nightly import MAIN_DLL, MARKER, MARKER_KEYS, SCALER
 
-FLAVOR = "helixsr-scaler"
 DLSS = "HelixSR/helixsr.dll"
 FSR4 = "OptiScaler/amd_fidelityfx_upscaler_dx12.dll"
 VERSION = "VERSION"
@@ -61,7 +61,7 @@ def store(out, folder, swap):
     (out / VERSION).unlink()
     marker = {k: None for k in MARKER_KEYS}
     marker.update(tag=tag, version=tag.lstrip("vV"))
-    (out / MARKER).write_text(json.dumps({**marker, "flavor": FLAVOR}, indent=1) + "\n")
+    (out / MARKER).write_text(json.dumps({**marker, "flavor": SCALER}, indent=1) + "\n")
     Path(folder).parent.mkdir(parents=True, exist_ok=True)
     swap(out, folder)
     return marker

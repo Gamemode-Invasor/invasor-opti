@@ -1,23 +1,13 @@
 import json
-import os
 import shutil
 import struct
 import tempfile
 import unittest
 from pathlib import Path
 
-from tests.loader import FakeCtx, InvalidArgument, Unavailable, fake_steam, load_backend, submodule, swap_dir
+from tests.loader import FakeCtx, InvalidArgument, Unavailable, fake_game, fake_steam, load_backend, submodule, swap_dir, tree
 
 MARKER = ".invasor-opti.version"
-
-
-def tree(folder):
-    """{relative path: link target, "dir" or file bytes}."""
-    out = {}
-    for p in sorted(Path(folder).rglob("*")):
-        rel = str(p.relative_to(folder))
-        out[rel] = ("-> " + os.readlink(p)) if p.is_symlink() else "dir" if p.is_dir() else p.read_bytes()
-    return out
 
 
 class InstallTest(unittest.TestCase):
@@ -225,15 +215,7 @@ class GameInstallTest(unittest.TestCase):
     """The backend's methods: a fake Steam, the Global build and file in a tmp."""
 
     def setUp(self):
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, tmp)
-        steam = tmp / "Steam"
-        (steam / "steamapps/compatdata/42/pfx/drive_c").mkdir(parents=True)
-        self.umu = steam / "steamapps/compatdata/42/pfx/drive_c/windows/system32/umu"
-        self.b = load_backend()
-        self.b.setup(FakeCtx())
-        self.b.GLOBAL_DIR = tmp / "invasor-opti"
-        fake_steam(steam)
+        self.b, tmp, self.umu = fake_game(self)
 
     def make_build(self):
         build = self.b.GLOBAL_DIR / "optiscaler"

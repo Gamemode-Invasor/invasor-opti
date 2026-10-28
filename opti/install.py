@@ -16,12 +16,11 @@ import shutil
 from pathlib import Path
 
 from .files import Error, copy_file
-from .nightly import MAIN_DLL, MARKER, flavor, read_marker
+from .nightly import MAIN_DLL, MARKER, SCALER, flavor, read_marker
 
 DLL_NAMES = ("dxgi", "d3d12", "dbghelp", "winmm")
 INI = "OptiScaler.ini"
 FOLDER = "OptiScaler"  # OptiScaler's own folder, next to OptiScaler.dll
-SCALER = "helixsr-scaler"
 SCALER_FOLDERS = ("HelixSR", "Licenses")  # HelixSR Scaler's folders besides FOLDER
 SCALER_KEEP = "HelixSR/helixsr.ini"  # HLX DLSS's settings: a game keeps its own on update
 # Where Wine's OptiScaler hack (GE-Proton, proton-cachyos) loads WINE_OPTISCALER_NAME from, in compatdata/<appid>.
@@ -52,7 +51,7 @@ def with_dll(options, dll):
     return f"{word} {options}"
 
 
-def _copy(name):
+def _copy_name(name):
     """A build's folder, copied next to the game's before the swap."""
     return f".{name}.copy"
 
@@ -66,7 +65,7 @@ def _leftovers(umu, kind):
     """What a crash left of an install: the copies, and swap_dir's own .<folder>.old-*/.new-* (nothing else)."""
     out = []
     for name in _folders(kind):
-        out += [umu / _copy(name), *umu.glob(f".{name}.old-*"), *umu.glob(f".{name}.new-*")]
+        out += [umu / _copy_name(name), *umu.glob(f".{name}.old-*"), *umu.glob(f".{name}.new-*")]
     return out
 
 
@@ -133,7 +132,8 @@ def install(build, umu, ini, dll, swap):
     """Copy the build (a folder as nightly.update or helixsr.store leaves it) into umu: OptiScaler.dll, its
     folders and its marker; ini as OptiScaler.ini unless the game has one (for HelixSR Scaler, one with
     [HelixSR]); and <dll>.dll linked to OptiScaler.dll. swap(new, target) puts a folder in place at once
-    (ctx.archive.swap_dir). Another flavor already installed must be uninstalled first."""
+    (ctx.archive.swap_dir). Refused when OptiScaler (either flavor) is installed already: update it, or
+    uninstall it first."""
     _check_dll(dll)
     build, umu = Path(build), Path(umu)
     if not (build / MAIN_DLL).is_file():
@@ -142,13 +142,13 @@ def install(build, umu, ini, dll, swap):
     main = umu / MAIN_DLL
     if main.is_file():
         raise Error("OptiScaler is already installed in this game: update it, or uninstall it first")
-    _free(umu, dll, main if main.is_file() else build / MAIN_DLL)
+    _free(umu, dll, build / MAIN_DLL)
     umu.mkdir(parents=True, exist_ok=True)
     for leftover in _leftovers(umu, kind):
         shutil.rmtree(leftover, ignore_errors=True)
     for name in _folders(kind):
         if (build / name).is_dir():
-            new = umu / _copy(name)
+            new = umu / _copy_name(name)
             shutil.copytree(build / name, new)
             swap(new, umu / name)
     copy_file(build / MAIN_DLL, main)

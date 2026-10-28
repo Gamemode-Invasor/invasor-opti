@@ -14,6 +14,8 @@
 #   HelixSR/helixsr.dll, HelixSR/helixsr.ini
 #                   HLX DLSS with its network embedded, and its settings
 #   VERSION         the release's tag
+#   amdxcffx64.dll  AMD's FSR 4 driver file the build used (2.4.0.4370, checked by HelixSR's setup), when the
+#                   setup got it: it's AMD's own DLL, kept for OptiScaler's FSR 4 (for this device only)
 # Everything is built in a temporary folder, removed always (zip, portable Python, shader compilers, AMD's
 # package, Wine prefix): under $TMPDIR, so point it at a disk when /tmp is in RAM. helixsr-setup.sh runs
 # unchanged, but its games step is disabled in the temporary copy: nothing is installed in any game.
@@ -29,11 +31,10 @@ OUT=""
 ASSUME_YES=0
 DLSS_LICENSE="https://github.com/NVIDIA/DLSS/blob/v310.7.0/LICENSE.txt"
 DLL_NAME="helixsr.dll"
-INI_NAME="helixsr.ini"
 
 say() { printf '[helixsr-fetch] %s\n' "$*"; }
 die() { printf '[helixsr-fetch] error: %s\n' "$*" >&2; exit 1; }
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # --- arguments ---
 while [ $# -gt 0 ]; do
@@ -68,7 +69,7 @@ if [ "$ASSUME_YES" != 1 ]; then
     [ -t 0 ] || die "no interactive terminal: use --yes to accept the downloads of NVIDIA's DLL and AMD's package"
     cat <<EOF
 HelixSR $TAG will be downloaded and, to build it, NVIDIA's DLSS 310.7.0 DLL and AMD's driver package (about
-420 MB, only its FSR 4 file is read; both used once and removed).
+420 MB, only its FSR 4 file is read; NVIDIA's DLL is used once and removed, AMD's file is left in the folder too).
 NVIDIA's license: $DLSS_LICENSE
 The DLLs built carry data made from NVIDIA's and AMD's files: they're for this device only, don't share them.
 Into: $OUT
@@ -136,15 +137,40 @@ if [ "$A_OK" = 0 ] && [ "$B_OK" = 0 ]; then
     die "can't disable or isolate the games step: check helixsr-fetch.sh against this release"
 fi
 
+# --- keep AMD's FSR 4 file: the setup only uses it in memory ---
+# setup/hlxfsr4/hlx/amd.py's get() returns (the DLL's bytes, where they came from), checked against its SHA-256;
+# in the temporary copy it also writes them to $HELIXSR_FETCH_AMD. Without that file, nothing is kept.
+AMD_PY="$PKG/setup/hlxfsr4/hlx/amd.py"
+AMD_OUT="$T/amd/amdxcffx64.dll"
+if [ -f "$AMD_PY" ]; then
+    mkdir -p "$T/amd"
+    cat >> "$AMD_PY" <<'PY'
+
+
+_helixsr_fetch_get = get
+
+
+def get(*args, **kwargs):  # helixsr-fetch: keep the file too
+    got = _helixsr_fetch_get(*args, **kwargs)
+    out = os.environ.get("HELIXSR_FETCH_AMD")
+    if out:
+        with open(out, "wb") as f:
+            f.write(got[0])
+    return got
+PY
+else
+    say "warning: this release has no setup/hlxfsr4/hlx/amd.py (did HelixSR change?): AMD's file won't be kept"
+fi
+
 # --- build with the official setup ---
 # --yes accepts its downloads (agreed above); since HelixSR v2.0.0 it also forwards --yes to the games
 # step (hence the no-op and the temporary HOME above). XDG_* send Python/DXC/prefix and caches to the
 # temporary folder.
-say "building HelixSR (it can take a few minutes)..."
+say "building HelixSR (it can take several minutes)..."
 LOG="$T/build.log"
 set +e
 ( cd "$PKG" && HOME="$SETUP_HOME" XDG_DATA_HOME="$T/data" XDG_CACHE_HOME="$T/cache" XDG_CONFIG_HOME="$T/config" \
-    bash ./helixsr-setup.sh --yes </dev/null ) 2>&1 \
+    HELIXSR_FETCH_AMD="$AMD_OUT" bash ./helixsr-setup.sh --yes </dev/null ) 2>&1 \
     | tee "$LOG"
 set -e
 
@@ -170,10 +196,10 @@ tail_is "$FSR4" 24 HLXFSR4D || fail "the build made no HLX FSR 4 with its shader
 mkdir -p "$OUT" || die "can't make $OUT"
 cp -a "$SCALER/." "$OUT/" || die "can't copy HelixSR Scaler to $OUT"
 rm -f "$OUT"/README*.txt "$OUT/HelixSR-Scaler-package.txt" "$OUT/setup_linux.sh" "$OUT/setup_windows.bat"
-mkdir -p "$OUT/HelixSR" || die "can't make $OUT/HelixSR"
-cp -f "$PKG/HelixSR/$DLL_NAME" "$OUT/HelixSR/$DLL_NAME" || die "can't copy $DLL_NAME to $OUT"
-if [ -f "$PKG/HelixSR/$INI_NAME" ]; then
-    cp -f "$PKG/HelixSR/$INI_NAME" "$OUT/HelixSR/$INI_NAME" || die "can't copy $INI_NAME to $OUT"
-fi
+cp -a "$PKG/HelixSR" "$OUT/" || die "can't copy HelixSR to $OUT"
 printf '%s\n' "$TAG" > "$OUT/VERSION"
+if [ -s "$AMD_OUT" ]; then
+    cp -f "$AMD_OUT" "$OUT/amdxcffx64.dll" || die "can't copy amdxcffx64.dll to $OUT"
+    say "AMD's FSR 4 file kept: amdxcffx64.dll"
+fi
 say "done: HelixSR $TAG (HelixSR Scaler, HLX DLSS and HLX FSR 4) in $OUT"
