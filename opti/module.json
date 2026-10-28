@@ -1,10 +1,10 @@
 {
   "api": 1,
   "min_core": "0.3.0",
-  "name": "OptiScaler",
-  "version": "0.2.0",
+  "name": "OptiHLX",
+  "version": "0.3.0",
   "author": "FranjeGueje",
-  "description": "OptiScaler from the panel: get the latest nightly, install it in the selected game with your FSR 4 driver DLLs or HelixSR, and edit any OptiScaler.ini, every option with its description.",
+  "description": "OptiScaler and HelixSR Scaler from the panel: get the latest nightly or compile HelixSR Scaler (HLX DLSS and HLX FSR 4), install either in the selected game with your FSR 4 driver DLLs, and edit its OptiScaler.ini, every option with its description.",
   "order": 45,
   "tab": "Opti",
   "no_qam": true

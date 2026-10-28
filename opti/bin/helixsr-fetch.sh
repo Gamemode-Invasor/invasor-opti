@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
-# helixsr-fetch.sh - downloads the latest stable HelixSR, builds it on this device and leaves its DLL and ini.
+# helixsr-fetch.sh - downloads the latest stable HelixSR, builds it on this device and leaves HelixSR Scaler
+# with HelixSR's two upscalers, laid out as a game's umu folder.
 #
 #   ./helixsr-fetch.sh --out DIR [--yes]
 #
 #   --out DIR       where to leave the result (made if needed)
-#   --yes, -y       don't ask (accepts the download of NVIDIA's DLSS DLL the build needs)
+#   --yes, -y       don't ask (accepts the downloads of NVIDIA's DLSS DLL and AMD's driver package the build needs)
 #
-# Leaves in DIR:
-#   helixsr.dll     HelixSR with its network embedded
-#   helixsr.ini     its settings, as the release ships them
-# Everything is built in a temporary folder, removed always (zip, portable Python, shader compiler, Wine
-# prefix): under $TMPDIR, so point it at a disk when /tmp is in RAM. helixsr-setup.sh runs unchanged, but its games step is disabled in the temporary copy: only the
-# DLL is built, nothing is installed in any game.
+# Leaves in DIR (HelixSR 3.x):
+#   OptiScaler.dll, OptiScaler.ini, OptiScaler/, Licenses/
+#                   HelixSR Scaler (OptiScaler with HelixSR) as the release ships it; OptiScaler/ holds HLX FSR 4
+#                   (amd_fidelityfx_upscaler_dx12.dll, with its shaders) and AMD's FSR next to it (.amd.dll)
+#   HelixSR/helixsr.dll, HelixSR/helixsr.ini
+#                   HLX DLSS with its network embedded, and its settings
+#   VERSION         the release's tag
+#   amdxcffx64.dll  AMD's FSR 4 driver file the build used (2.4.0.4370, checked by HelixSR's setup), when the
+#                   setup got it: it's AMD's own DLL, kept for OptiScaler's FSR 4 (for this device only)
+# Everything is built in a temporary folder, removed always (zip, portable Python, shader compilers, AMD's
+# package, Wine prefix): under $TMPDIR, so point it at a disk when /tmp is in RAM. helixsr-setup.sh runs
+# unchanged, but its games step is disabled in the temporary copy: nothing is installed in any game.
 # Needs: bash, curl, unzip, Python 3 with numpy (or the setup downloads a portable one) and Proton/Wine.
 #
-# NOTICE: the network comes from NVIDIA's DLSS DLL (its license). The DLLs built are for your own device:
-# don't share or upload them.
+# NOTICE: HLX DLSS's network comes from NVIDIA's DLSS DLL (its license) and HLX FSR 4's shaders from AMD's FSR 4
+# driver file. The DLLs built are for your own device: don't share or upload them.
 set -euo pipefail
 
 REPO="lonewolf0622/HelixSR"
@@ -24,11 +31,10 @@ OUT=""
 ASSUME_YES=0
 DLSS_LICENSE="https://github.com/NVIDIA/DLSS/blob/v310.7.0/LICENSE.txt"
 DLL_NAME="helixsr.dll"
-INI_NAME="helixsr.ini"
 
 say() { printf '[helixsr-fetch] %s\n' "$*"; }
 die() { printf '[helixsr-fetch] error: %s\n' "$*" >&2; exit 1; }
-usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # --- arguments ---
 while [ $# -gt 0 ]; do
@@ -60,11 +66,12 @@ say "version: $TAG"
 
 # --- confirmation (NVIDIA's DLL is downloaded and used once) ---
 if [ "$ASSUME_YES" != 1 ]; then
-    [ -t 0 ] || die "no interactive terminal: use --yes to accept the download of NVIDIA's DLL"
+    [ -t 0 ] || die "no interactive terminal: use --yes to accept the downloads of NVIDIA's DLL and AMD's package"
     cat <<EOF
-HelixSR $TAG will be downloaded and, to build it, NVIDIA's DLSS 310.7.0 DLL (used once and removed).
-Its license: $DLSS_LICENSE
-The DLLs built carry NVIDIA's network: they're for this device only, don't share them.
+HelixSR $TAG will be downloaded and, to build it, NVIDIA's DLSS 310.7.0 DLL and AMD's driver package (about
+420 MB, only its FSR 4 file is read; NVIDIA's DLL is used once and removed, AMD's file is left in the folder too).
+NVIDIA's license: $DLSS_LICENSE
+The DLLs built carry data made from NVIDIA's and AMD's files: they're for this device only, don't share them.
 Into: $OUT
 EOF
     read -r -p "Continue? [Y/n] " ans || ans=n
@@ -85,7 +92,7 @@ SETUP=$(find "$T/pkg" -name helixsr-setup.sh | head -n1)
 [ -n "$SETUP" ] || die "this release has no helixsr-setup.sh"
 PKG=$(dirname "$SETUP")
 
-# --- keep the games step away: only the DLL is built here ---
+# --- keep the games step away: nothing is installed in any game here ---
 # HelixSR v2.0.0 (2026-10-19) makes helixsr-setup.sh forward --yes to its games step
 # (setup/helixsr_install.py), which then installs HelixSR in EVERY game it finds.
 # Two barriers; if neither can be set up, the script dies before the setup runs:
@@ -101,11 +108,11 @@ if [ -f "$INSTALLER" ]; then
     cat > "$INSTALLER" <<'PY'
 #!/usr/bin/env python3
 import sys
-print("[helixsr-setup] games step skipped (helixsr-fetch: only the DLL is built)", flush=True)
+print("[helixsr-setup] games step skipped (helixsr-fetch: nothing goes into games)", flush=True)
 sys.exit(0)
 PY
     A_OK=1
-    say "games step disabled (this build only makes the DLL)"
+    say "games step disabled (nothing goes into games)"
 else
     say "warning: this release has no setup/helixsr_install.py (did HelixSR change?): the temporary HOME is needed"
 fi
@@ -130,48 +137,69 @@ if [ "$A_OK" = 0 ] && [ "$B_OK" = 0 ]; then
     die "can't disable or isolate the games step: check helixsr-fetch.sh against this release"
 fi
 
+# --- keep AMD's FSR 4 file: the setup only uses it in memory ---
+# setup/hlxfsr4/hlx/amd.py's get() returns (the DLL's bytes, where they came from), checked against its SHA-256;
+# in the temporary copy it also writes them to $HELIXSR_FETCH_AMD. Without that file, nothing is kept.
+AMD_PY="$PKG/setup/hlxfsr4/hlx/amd.py"
+AMD_OUT="$T/amd/amdxcffx64.dll"
+if [ -f "$AMD_PY" ]; then
+    mkdir -p "$T/amd"
+    cat >> "$AMD_PY" <<'PY'
+
+
+_helixsr_fetch_get = get
+
+
+def get(*args, **kwargs):  # helixsr-fetch: keep the file too
+    got = _helixsr_fetch_get(*args, **kwargs)
+    out = os.environ.get("HELIXSR_FETCH_AMD")
+    if out:
+        with open(out, "wb") as f:
+            f.write(got[0])
+    return got
+PY
+else
+    say "warning: this release has no setup/hlxfsr4/hlx/amd.py (did HelixSR change?): AMD's file won't be kept"
+fi
+
 # --- build with the official setup ---
 # --yes accepts its downloads (agreed above); since HelixSR v2.0.0 it also forwards --yes to the games
 # step (hence the no-op and the temporary HOME above). XDG_* send Python/DXC/prefix and caches to the
 # temporary folder.
-say "building HelixSR (it can take a few minutes)..."
+say "building HelixSR (it can take several minutes)..."
 LOG="$T/build.log"
 set +e
 ( cd "$PKG" && HOME="$SETUP_HOME" XDG_DATA_HOME="$T/data" XDG_CACHE_HOME="$T/cache" XDG_CONFIG_HOME="$T/config" \
-    bash ./helixsr-setup.sh --yes </dev/null ) 2>&1 \
+    HELIXSR_FETCH_AMD="$AMD_OUT" bash ./helixsr-setup.sh --yes </dev/null ) 2>&1 \
     | tee "$LOG"
 set -e
 
-# --- find the result (whatever folders the author uses) ---
-# The DLL: a .dll over 1 MB with the network embedded (HXSRNET1 marker at its end).
-has_net() { [ -f "$1" ] && [ "$(wc -c <"$1")" -gt 1048576 ] && [ "$(tail -c 32 "$1" | head -c 8 | tr -d '\0')" = HXSRNET1 ]; }
+# --- check the result: HelixSR 3.x's layout ---
+#   HelixSR/helixsr.dll                                   HLX DLSS, its network at the end (HXSRNET1 marker)
+#   helixsr-scaler/OptiScaler.dll                         HelixSR Scaler
+#   helixsr-scaler/OptiScaler/amd_fidelityfx_upscaler_dx12.dll
+#                                                         HLX FSR 4, its shaders at the end (HLXFSR4D marker)
+tail_is() { [ -f "$1" ] && [ "$(wc -c <"$1")" -gt 1048576 ] && [ "$(tail -c "$2" "$1" | head -c 8 | tr -d '\0')" = "$3" ]; }
 fail() {
     printf '[helixsr-fetch] ---- last lines of the build ----\n' >&2
     tail -n 30 "$LOG" >&2 || true
     die "$1"
 }
 
-SRC_DLL=""; SRC_DIR=""
-CANDIDATES=()
-while IFS= read -r d; do CANDIDATES+=("$d"); done < <(find "$T/pkg" -type d -name fsr-dropin 2>/dev/null)
-CANDIDATES+=("$PKG/fsr3-drop-in" "$PKG")
-for d in "${CANDIDATES[@]}"; do
-    [ -d "$d" ] || continue
-    for f in "$d/amd_fidelityfx_dx12.dll" "$d/amd_fidelityfx_upscaler_dx12.dll" "$d"/*.dll; do
-        if has_net "$f"; then SRC_DLL="$f"; SRC_DIR="$d"; break 2; fi
-    done
-done
-[ -n "$SRC_DLL" ] || fail "the build made no DLL with the network embedded (did HelixSR's format change?)"
+SCALER="$PKG/helixsr-scaler"
+FSR4="$SCALER/OptiScaler/amd_fidelityfx_upscaler_dx12.dll"
+tail_is "$PKG/HelixSR/$DLL_NAME" 32 HXSRNET1 || fail "the build made no HLX DLSS with its network (HelixSR/$DLL_NAME)"
+[ -f "$SCALER/OptiScaler.dll" ] || fail "this release has no HelixSR Scaler (helixsr-scaler/OptiScaler.dll)"
+tail_is "$FSR4" 24 HLXFSR4D || fail "the build made no HLX FSR 4 with its shaders (helixsr-scaler/OptiScaler/)"
 
-SRC_INI="$SRC_DIR/$INI_NAME"
-[ -f "$SRC_INI" ] || SRC_INI=$(find "$T/pkg" -name "$INI_NAME" 2>/dev/null | head -n1)
-
-# --- leave the result ---
+# --- leave the result: HelixSR Scaler as a game's umu folder, with HelixSR/ next to OptiScaler.dll ---
 mkdir -p "$OUT" || die "can't make $OUT"
-cp -f "$SRC_DLL" "$OUT/$DLL_NAME" || die "can't copy $DLL_NAME to $OUT"
-if [ -n "$SRC_INI" ] && [ -f "$SRC_INI" ]; then
-    cp -f "$SRC_INI" "$OUT/$INI_NAME" || die "can't copy $INI_NAME to $OUT"
-else
-    say "warning: this release has no $INI_NAME; HelixSR will use its defaults"
+cp -a "$SCALER/." "$OUT/" || die "can't copy HelixSR Scaler to $OUT"
+rm -f "$OUT"/README*.txt "$OUT/HelixSR-Scaler-package.txt" "$OUT/setup_linux.sh" "$OUT/setup_windows.bat"
+cp -a "$PKG/HelixSR" "$OUT/" || die "can't copy HelixSR to $OUT"
+printf '%s\n' "$TAG" > "$OUT/VERSION"
+if [ -s "$AMD_OUT" ]; then
+    cp -f "$AMD_OUT" "$OUT/amdxcffx64.dll" || die "can't copy amdxcffx64.dll to $OUT"
+    say "AMD's FSR 4 file kept: amdxcffx64.dll"
 fi
-say "done: HelixSR $TAG in $OUT"
+say "done: HelixSR $TAG (HelixSR Scaler, HLX DLSS and HLX FSR 4) in $OUT"

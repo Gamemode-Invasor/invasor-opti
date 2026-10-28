@@ -1,15 +1,13 @@
-"""OptiScaler: OptiScaler.ini files from Invasor's panel, and OptiScaler itself in games.
+"""OptiScaler: the selected game's OptiScaler.ini from Invasor's panel, and OptiScaler itself in games.
 
-Two files: the selected game's, in its Proton prefix, in the folder Wine's OptiScaler hack loads
-it from (install.UMU); and the module's own Global one (GLOBAL_DIR/OptiScaler.ini), the one a game
-gets when OptiScaler is installed in it. The Global one starts as a copy of
-assets/OptiScaler.invasor.ini and can be reset to that or to OptiScaler's own
-(assets/OptiScaler.optiscaler.ini).
+The file is the selected game's, in its Proton prefix, in the folder Wine's OptiScaler hack loads
+it from (install.UMU). A game gets its build's own file when OptiScaler is installed in it, with
+only what this module needs set (INSTALL_INI, SCALER_INI).
 
-Next to the Global file, NIGHTLY_NAME holds the latest OptiScaler nightly, downloaded on request
-in a thread of its own (see nightly.py), and CUSTOM_NAME the DLLs the user brings (see custom.py), or
-HelixSR built on this device by bin/helixsr-fetch.sh (also in a thread of its own). install.py puts them
-in a game.
+In GLOBAL_DIR, NIGHTLY_NAME holds the latest OptiScaler nightly, downloaded on request
+in a thread of its own (see nightly.py), HELIXSR_NAME HelixSR Scaler with HelixSR's upscalers, built on
+this device by bin/helixsr-fetch.sh (also in a thread of its own, see helixsr.py), and CUSTOM_NAME the
+DLLs the user brings (see custom.py). install.py puts either OptiScaler in a game, custom.py the DLLs.
 
 A file is the only source of truth: every call reads it again, and a change rewrites just the
 line of that key (comments, order and line ends stay as they are), atomically, and only if no
@@ -26,14 +24,21 @@ import threading
 import time
 from pathlib import Path
 
-from . import custom, files, ini, install, nightly
+from . import custom, files, helixsr, ini, install, nightly
 
 ASSETS = Path(__file__).resolve().parent / "assets"
-# What the Global file can be reset to: OptiScaler's own file and the one this module ships.
-DEFAULTS = {"optiscaler": ASSETS / "OptiScaler.optiscaler.ini", "invasor": ASSETS / "OptiScaler.invasor.ini"}
+# OptiScaler's own file (v10.0.0-pre1): a build's when it has none, and its defaults when none is downloaded.
+OPTISCALER_INI = ASSETS / "OptiScaler.optiscaler.ini"
 # Outside the module's folder, which an update replaces.
 GLOBAL_DIR = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "invasor-opti"
 NIGHTLY_NAME = "optiscaler"
+HELIXSR_NAME = "helixsr"
+FLAVORS = (nightly.OPTISCALER, nightly.SCALER)
+# What a game's new OptiScaler.ini needs: its DLLs from its own folder (else HelixSR Scaler takes the game's .exe
+# folder, where a game's own FSR, XeSS or no amdxcffx64.dll may be); for HelixSR Scaler, HLX FSR 4 as the
+# FidelityFX upscaler too.
+INSTALL_INI = (("Libraries", "OptiDllPath", r"c:\windows\system32\umu\OptiScaler"),)
+SCALER_INI = (("Libraries", "FfxDx12SRPath", r"C:\windows\system32\umu\OptiScaler\amd_fidelityfx_upscaler_dx12.dll"),)
 CUSTOM_NAME = "custom"
 MAX_BYTES = 4 * 1024 * 1024  # OptiScaler's own is ~60 KB: anything this big isn't one
 
@@ -47,7 +52,7 @@ _thread = None  # the download's, while it runs
 TEARDOWN_WAIT = 8  # of the core's 10 s for teardown
 # HelixSR's build: the script that downloads and builds it, and how long it may take.
 HELIXSR_SCRIPT = Path(__file__).resolve().parent / "bin" / "helixsr-fetch.sh"
-HELIXSR_TIMEOUT = 1800
+HELIXSR_TIMEOUT = 3600  # it also downloads AMD's ~420 MB driver package
 HELIXSR_RELEASE_API = "https://api.github.com/repos/lonewolf0622/HelixSR/releases/latest"  # the stable one
 HELIXSR_CHECK_TTL = 3600  # seconds a found tag is reused; a failed check is retried after HELIXSR_CHECK_RETRY
 HELIXSR_CHECK_RETRY = 120
@@ -191,6 +196,44 @@ def _save(path, data, expected=None):
     return str(path.stat().st_mtime_ns)
 
 
+def _with_value(text, encoding, section, key, value):
+    """(text with the key set, the value as written). A select's value must be one of its options;
+    InvalidArgument says why it can't be written."""
+    found = _find_key(text, section, key)
+    if found is None:
+        raise ctx.InvalidArgument(f"{install.INI} has no [{section}] {key}")
+    try:
+        value = ini.check_value(value)
+    except ValueError as e:
+        raise ctx.InvalidArgument(str(e)) from None
+    control = ini.infer(found["comments"], found["value"])
+    if control["kind"] == "select":
+        option = ini.match_option(control["options"], value)
+        if option is None:
+            raise ctx.InvalidArgument(f"{value!r} isn't a value of [{section}] {key}")
+        value = option
+    try:
+        new_text = ini.set_value(text, section, key, value)
+        new_text.encode(encoding)
+    except (KeyError, ValueError) as e:  # UnicodeEncodeError is a ValueError
+        raise ctx.InvalidArgument(str(e)) from None
+    return new_text, value
+
+
+def _apply(path, values):
+    """Write several values ({(section, key): value}) in one save; Unavailable when one can't be written (a key
+    the file hasn't, a value it doesn't take), and then nothing is."""
+    with _write:
+        text, encoding, current = _read(path)
+        for (section, key), value in values.items():
+            try:
+                text, value = _with_value(text, encoding, section, key, value)
+            except ctx.InvalidArgument as e:
+                raise ctx.Unavailable(f"can't set [{section}] {key} in {install.INI}: {e}") from None
+        _save(path, text.encode(encoding), current)
+    ctx.log.info("%s: %d values set", path, len(values))
+
+
 def _set_in_file(path, section, key, value, mtime):
     """Write one value. A select's value must be one of its options (what load offered); returns
     {"value", "mtime"}."""
@@ -198,24 +241,7 @@ def _set_in_file(path, section, key, value, mtime):
         text, encoding, current = _read(path)
         if current != str(mtime):
             raise ctx.Unavailable(f"{install.INI} was changed by another program: reload and try again")
-        found = _find_key(text, section, key)
-        if found is None:
-            raise ctx.InvalidArgument(f"{install.INI} has no [{section}] {key}")
-        try:
-            value = ini.check_value(value)
-        except ValueError as e:
-            raise ctx.InvalidArgument(str(e)) from None
-        control = ini.infer(found["comments"], found["value"])
-        if control["kind"] == "select":
-            option = ini.match_option(control["options"], value)
-            if option is None:
-                raise ctx.InvalidArgument(f"{value!r} isn't a value of [{section}] {key}")
-            value = option
-        try:
-            new_text = ini.set_value(text, section, key, value)
-            new_text.encode(encoding)
-        except (KeyError, ValueError) as e:  # UnicodeEncodeError is a ValueError
-            raise ctx.InvalidArgument(str(e)) from None
+        new_text, value = _with_value(text, encoding, section, key, value)
         new_mtime = _save(path, new_text.encode(encoding), current)
     ctx.log.info("%s: [%s] %s = %s", path, section, key, value)
     return {"value": value, "mtime": new_mtime}
@@ -239,6 +265,7 @@ def load(appid):
       (whether its launch options load OptiScaler as that DLL; None when there's nothing to tell) and
       "can_apply" (whether game_apply_launch can write them); None without a prefix;
     - "build": the nightly Global has downloaded (nightly.read_marker), or None;
+    - "helixsr": the HelixSR Scaler Global has built, the same way, or None;
     - "custom": {slot: kept in Global}."""
     appid = _appid(appid)
     path = _ini_path(appid)
@@ -246,11 +273,12 @@ def load(appid):
         r = {"state": "no_prefix", "path": None, "mtime": None, "sections": [], "install": None}
     else:
         r = _load_file(path)
-        defaults = _optiscaler_defaults()
+        state = install.state(path.parent)
+        defaults = _optiscaler_defaults(state["flavor"])
         for sec in r["sections"]:
             for k in sec["keys"]:
                 k["default"] = defaults.get((sec["name"], k["key"]))  # None: OptiScaler's file hasn't the key
-        r["install"] = {**install.state(path.parent), "extras": custom.game_state(path.parent)}
+        r["install"] = {**state, "extras": custom.game_state(path.parent)}
         dll = r["install"]["dll"]
         options = _launch_options(appid) if dll else None
         # Whether the launch options load OptiScaler as that DLL; None when there's nothing to tell.
@@ -258,15 +286,17 @@ def load(appid):
         # Whether "Apply to the game" can write them (Steam may lack the call: then only Copy).
         r["install"]["can_apply"] = bool(dll) and r["install"]["installed"] and _can_set_launch_options()
     r["build"] = nightly.read_marker(_nightly_dir())
+    r["helixsr"] = nightly.read_marker(_helixsr_dir())
     r["custom"] = {slot: kept is not None for slot, kept in custom.status(_custom_dir()).items()}
     return r
 
 
-def _optiscaler_defaults():
-    """{(section, key): value} of OptiScaler's own file: the downloaded build's, else the one in assets."""
-    built = _nightly_dir() / install.INI
+def _optiscaler_defaults(flavor=None):
+    """{(section, key): value} of OptiScaler's own file: the downloaded build's (HelixSR Scaler's for its
+    flavor), else the one in assets."""
+    built = (_helixsr_dir() if flavor == nightly.SCALER else _nightly_dir()) / install.INI
     try:
-        text, _, _ = _read(built if built.is_file() else DEFAULTS["optiscaler"])
+        text, _, _ = _read(built if built.is_file() else OPTISCALER_INI)
     except ctx.Unavailable:
         return {}
     return {(s["name"], k["key"]): k["value"] for s in ini.parse(text) for k in s["keys"]}
@@ -296,22 +326,55 @@ def _in_game(appid, what, fn):
     return load(appid)
 
 
-def game_install(appid, dll):
-    """Install the nightly Global has downloaded into the game, loaded as <dll>.dll."""
-    build = _nightly_dir()
-    global_ini = _global_path()  # before the write lock: making it takes the lock too
+def _flavor_build(flavor):
+    """The folder of the flavor's build in Global, checked to be there."""
+    if flavor == nightly.SCALER:
+        build, missing = _helixsr_dir(), "There is no HelixSR Scaler to install: compile HelixSR in Global first"
+    else:
+        build, missing = _nightly_dir(), "There is no OptiScaler to install: download it in Global first"
+    if nightly.read_marker(build) is None:
+        raise ctx.Unavailable(missing)
+    return build
+
+
+def game_install(appid, dll, flavor=nightly.OPTISCALER):
+    """Install a build of Global into the game, loaded as <dll>.dll: the nightly ("optiscaler") or HelixSR
+    Scaler ("helixsr-scaler"). A game without an OptiScaler.ini gets the build's own with INSTALL_INI set;
+    HelixSR Scaler's always has SCALER_INI and INSTALL_INI set, and it also gets the FSR 4 driver DLLs when
+    they're kept in Global. Set up whole or not at all."""
+    if flavor not in FLAVORS:
+        raise ctx.InvalidArgument(f"flavor must be one of {', '.join(FLAVORS)}")
+    scaler = flavor == nightly.SCALER
+    ini_path = _game_umu(appid) / install.INI
+    # A game's own OptiScaler.ini stays as it is; HelixSR Scaler sets aside one without [HelixSR] (install.install).
+    fresh = not ini_path.is_file() or (scaler and not install.has_helixsr_section(ini_path))
     with _build:
-        if nightly.read_marker(build) is None:
-            raise ctx.Unavailable("There is no OptiScaler to install: download it in Global first")
-        return _in_game(appid, f"install OptiScaler as {dll}.dll", lambda umu: install.install(build, umu, global_ini, dll, ctx.archive.swap_dir))
+        build = _flavor_build(flavor)
+        what = f"install {'HelixSR Scaler' if scaler else 'OptiScaler'} as {dll}.dll"
+        ini_src = build / install.INI if (build / install.INI).is_file() else OPTISCALER_INI
+        _in_game(appid, what, lambda umu: install.install(build, umu, ini_src, dll, ctx.archive.swap_dir))
+    umu = ini_path.parent
+    try:  # a HelixSR Scaler without its two keys loads the game's own DLLs
+        if fresh or scaler:
+            _apply(ini_path, {(s, k): v for s, k, v in (*INSTALL_INI, *(SCALER_INI if scaler else ()))})
+        if scaler and custom.status(_custom_dir())["fsr4"]:
+            with _write:
+                custom.enable(_custom_dir(), umu, "fsr4")
+    except BaseException:
+        with _write:
+            install.uninstall(umu)
+        raise
+    return load(appid)
 
 
 def game_update(appid):
-    """Bring the game's OptiScaler to the nightly Global has downloaded (see install.update)."""
-    build = _nightly_dir()
+    """Bring the game's OptiScaler to Global's build of its flavor (see install.update)."""
+    umu = _game_umu(appid)
+    state = install.state(umu)
+    if not state["installed"]:
+        raise ctx.Unavailable("OptiScaler isn't installed in this game")
     with _build:
-        if nightly.read_marker(build) is None:
-            raise ctx.Unavailable("There is no OptiScaler to install: download it in Global first")
+        build = _flavor_build(state["flavor"])
         return _in_game(appid, "update OptiScaler", lambda umu: install.update(build, umu))
 
 
@@ -342,68 +405,17 @@ def game_apply_launch(appid):
 
 
 def game_extra(appid, slot, on):
-    """Turn a custom slot on or off for the game. A slot with an "ini" entry also sets that key (on),
-    or puts it back to auto (off, only when it still has the slot's value: one of the user's own stays)."""
+    """Turn a custom slot on or off for the game."""
     if slot not in custom.SLOTS:
         raise ctx.InvalidArgument(f"slot must be one of {', '.join(custom.SLOTS)}")
     if not isinstance(on, bool):
         raise ctx.InvalidArgument("on must be true or false")
-    ini_path = _game_umu(appid) / install.INI
-    entry = custom.SLOTS[slot].get("ini")
-    if entry and on and (not ini_path.is_file() or _find_key(_read(ini_path)[0], *entry[:2]) is None):
-        # Checked before copying anything.
-        raise ctx.Unavailable(f"the {install.INI} of this game has no [{entry[0]}] {entry[1]}")
     if on:
-        r = _in_game(appid, f"turn {slot} on", lambda umu: custom.enable(_custom_dir(), umu, slot))
-    else:
-        r = _in_game(appid, f"turn {slot} off", lambda umu: custom.disable(umu, slot))
-    if entry and ini_path.is_file():
-        section, key, value = entry
-        text, _, mtime = _read(ini_path)
-        found = _find_key(text, section, key)
-        if on:
-            _set_in_file(ini_path, section, key, value, mtime)
-        elif found and found["value"].lower() == value.lower():
-            _set_in_file(ini_path, section, key, ini.AUTO, mtime)
-        r = load(appid)
-    return r
+        return _in_game(appid, f"turn {slot} on", lambda umu: custom.enable(_custom_dir(), umu, slot))
+    return _in_game(appid, f"turn {slot} off", lambda umu: custom.disable(umu, slot))
 
 
 # ---------- Global ----------
-
-def _global_path():
-    """The Global file, made from assets/OptiScaler.invasor.ini the first time."""
-    path = GLOBAL_DIR / install.INI
-    if not path.exists():
-        with _write:
-            if not path.exists():
-                _guarded("make the Global file", lambda: _reset_to(path, "invasor"), ctx.Unavailable)
-    return path
-
-
-def _reset_to(path, source):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _save(path, DEFAULTS[source].read_bytes())
-    ctx.log.info("%s: from %s", path, DEFAULTS[source].name)
-
-
-def global_load():
-    return _load_file(_global_path())
-
-
-def global_set(section, key, value, mtime):
-    return _set_in_file(_global_path(), section, key, value, mtime)
-
-
-def global_reset(source):
-    """Replace the Global file with one of DEFAULTS ("optiscaler" or "invasor"); returns global_load()."""
-    if source not in DEFAULTS:
-        raise ctx.InvalidArgument("source must be optiscaler or invasor")
-    path = _global_path()
-    with _write:
-        _guarded("reset the Global file", lambda: _reset_to(path, source), ctx.Unavailable)
-    return global_load()
-
 
 def _custom_dir():
     return GLOBAL_DIR / CUSTOM_NAME
@@ -429,6 +441,32 @@ def custom_remove(slot):
     return custom_status()
 
 
+# ---------- Background jobs ----------
+
+def _start(lock, target, name):
+    """Run target in a thread of its own while holding lock (target releases it); the thread, or None when
+    one already runs."""
+    if not lock.acquire(blocking=False):
+        return None
+    _stop.clear()
+    try:
+        thread = threading.Thread(target=target, name=name, daemon=True)
+        thread.start()
+    except BaseException:
+        lock.release()
+        raise
+    return thread
+
+
+def _task(label):
+    """A Tasks panel entry for a job, or None when the panel can't show one (the job runs all the same)."""
+    try:
+        return ctx.task(label)
+    except ctx.Unavailable as e:
+        ctx.log.warning("task not shown: %s", e)
+        return None
+
+
 # ---------- The nightly ----------
 
 def _nightly_dir():
@@ -443,15 +481,10 @@ def nightly_status():
 def nightly_download():
     """Start getting the latest nightly; {"started", "busy"}. nightly_status tells how it went."""
     global _thread
-    if not _download.acquire(blocking=False):
+    thread = _start(_download, _download_job, "opti-nightly")
+    if thread is None:
         return {"started": False, "busy": True}
-    _stop.clear()
-    try:
-        _thread = threading.Thread(target=_download_job, name="opti-nightly", daemon=True)
-        _thread.start()
-    except BaseException:
-        _download.release()
-        raise
+    _thread = thread
     return {"started": True, "busy": False}
 
 
@@ -459,11 +492,7 @@ def _download_job():
     global _last_error
     try:
         _last_error = None
-        try:
-            task = ctx.task("OptiScaler nightly")
-        except ctx.Unavailable as e:
-            ctx.log.warning("task not shown: %s", e)
-            task = None
+        task = _task("OptiScaler nightly")
         try:
             release, downloaded = nightly.update(_nightly_dir(), ctx.http, ctx.archive, task=task, stop=_stop, swap_lock=_build)
         except files.Error as e:
@@ -489,15 +518,20 @@ def _download_job():
 
 # ---------- HelixSR's build ----------
 
+def _helixsr_dir():
+    return GLOBAL_DIR / HELIXSR_NAME
+
+
 # Lines of the script that move the task on: (start of the line, fraction, text).
 HELIXSR_STAGES = (
     ("looking", 0.05, "Looking for the latest stable version"),
     ("version:", 0.10, "Version found"),
     ("downloading", 0.20, "Downloading"),
-    ("building", None, "Building (it can take a few minutes)"),
+    ("building", None, "Building (it can take several minutes)"),
 )
 
 
+AMD_DLL = "amdxcffx64.dll"  # AMD's FSR 4 file, which the script leaves when HelixSR's setup got it
 SAY = "[helixsr-fetch] "  # how the script's own lines start
 DIE = SAY + "error: "  # and the one it dies with
 
@@ -514,8 +548,9 @@ def _helixsr_stage(line):
 
 
 def helixsr_status():
-    """{"busy", "error"}: whether a build runs, and why the last one failed (or None)."""
-    return {"busy": _helix.locked(), "error": _helix_error}
+    """{"installed": the kept build (see nightly.read_marker) or None, "busy", "error"}: whether a build runs,
+    and why the last one failed (or None)."""
+    return {"installed": nightly.read_marker(_helixsr_dir()), "busy": _helix.locked(), "error": _helix_error}
 
 
 def _helixsr_latest():
@@ -546,17 +581,16 @@ def _version_key(version):
 
 
 def helixsr_check():
-    """{"installed": the kept DLL's version (or None), "latest": the latest stable tag (None when unknown),
-    "update": the kept DLL is older}. Asks GitHub (cached), so it's apart from helixsr_status."""
-    kept = custom.status(_custom_dir())["helixsr"] or []
-    installed = next((f["version"] for f in kept if f["name"].endswith(".dll")), None)
+    """{"installed": the kept build's version (or None), "latest": the latest stable tag (None when unknown),
+    "update": the kept build is older}. Asks GitHub (cached), so it's apart from helixsr_status."""
+    installed = (nightly.read_marker(_helixsr_dir()) or {}).get("version")
     latest = _helixsr_latest()
     have, newest = _version_key(installed), _version_key(latest)
     return {"installed": installed, "latest": latest, "update": have is not None and newest is not None and have < newest}
 
 
 def helixsr_build():
-    """Start downloading and building the latest stable HelixSR into the helixsr slot; {"started", "busy"}.
+    """Start downloading and building the latest stable HelixSR into HELIXSR_NAME; {"started", "busy"}.
     helixsr_status tells how it went."""
     global _helix_thread
     if not HELIXSR_SCRIPT.is_file():
@@ -564,15 +598,10 @@ def helixsr_build():
     # Heavy (download and build): not while a game is running.
     if ctx.game.running:
         raise ctx.Unavailable("a game is running: close it to build HelixSR")
-    if not _helix.acquire(blocking=False):
+    thread = _start(_helix, _helixsr_job, "opti-helixsr")
+    if thread is None:
         return {"started": False, "busy": True}
-    _stop.clear()
-    try:
-        _helix_thread = threading.Thread(target=_helixsr_job, name="opti-helixsr", daemon=True)
-        _helix_thread.start()
-    except BaseException:
-        _helix.release()
-        raise
+    _helix_thread = thread
     return {"started": True, "busy": False}
 
 
@@ -581,18 +610,17 @@ def _helixsr_job():
     work = None
     try:
         _helix_error = None
-        try:
-            task = ctx.task("HelixSR")
-        except ctx.Unavailable as e:
-            ctx.log.warning("task not shown: %s", e)
-            task = None
+        task = _task("HelixSR")
         progress = task.update if task else (lambda fraction, text: None)
         try:
             GLOBAL_DIR.mkdir(parents=True, exist_ok=True)
             work = Path(tempfile.mkdtemp(dir=GLOBAL_DIR, prefix=".helixsr-build."))
             _helixsr_run(work, progress)
-            with _write:
-                custom.store(_custom_dir(), "helixsr", work / "out" / "helixsr.dll", ctx.archive.swap_dir)
+            _keep_amd(work / "out" / AMD_DLL)
+            with _build:
+                if _stop.is_set():  # the module was unloaded meanwhile: leave things as they are
+                    raise files.Error("Build stopped")
+                helixsr.store(work / "out", _helixsr_dir(), ctx.archive.swap_dir)
         except files.Error as e:
             _helix_error = str(e)
         except OSError as e:
@@ -605,13 +633,31 @@ def _helixsr_job():
             if task:
                 task.fail(_helix_error)
             return
-        ctx.log.info("helixsr: built into %s", _custom_dir() / "helixsr")
+        ctx.log.info("helixsr: built into %s", _helixsr_dir())
         if task:
             task.done("Built")
     finally:
         if work is not None:
             shutil.rmtree(work, ignore_errors=True)
         _helix.release()
+
+
+def _keep_amd(path):
+    """AMD's FSR 4 file the build used (the script leaves it next to HelixSR Scaler, out of its tree): kept in the
+    fsr4 slot when it has no AMD_DLL yet (one the user chose stays), else dropped. Not keeping it fails nothing."""
+    if not path.is_file():
+        return
+    try:
+        with _write:
+            if custom.has(_custom_dir(), "fsr4", AMD_DLL):
+                ctx.log.info("helixsr: %s already in Custom DLLs, AMD's from the build not kept", AMD_DLL)
+            else:
+                custom.store(_custom_dir(), "fsr4", path, ctx.archive.swap_dir)
+                ctx.log.info("helixsr: AMD's %s kept in Custom DLLs", AMD_DLL)
+    except (files.Error, OSError, ctx.InvalidArgument) as e:
+        ctx.log.warning("helixsr: AMD's %s not kept: %s", AMD_DLL, e)
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def _helixsr_run(work, progress):
@@ -621,7 +667,7 @@ def _helixsr_run(work, progress):
     # even when the script is killed (its own cleanup doesn't run then).
     (work / "tmp").mkdir()
     env = dict(os.environ, TMPDIR=str(work / "tmp"))
-    # No shell; --yes accepts the DLSS license prompt (the UI's confirmation is the user's).
+    # No shell; --yes accepts the downloads of NVIDIA's DLL and AMD's package (the UI's confirmation is the user's).
     _helix_proc = proc = subprocess.Popen(
         ["bash", str(HELIXSR_SCRIPT), "--yes", "--out", str(work / "out")],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
@@ -685,7 +731,8 @@ def teardown():
 
 
 def uninstall(context, purge):
-    """With purge, the Global file, the downloaded nightly and the custom DLLs go too (the module's own data)."""
+    """With purge, the downloaded nightly, HelixSR Scaler and the custom DLLs go too (the module's own data,
+    and anything else left in GLOBAL_DIR)."""
     if purge:
         shutil.rmtree(GLOBAL_DIR, ignore_errors=True)
 
@@ -699,9 +746,6 @@ METHODS = {
     "game_set_dll": game_set_dll,
     "game_apply_launch": game_apply_launch,
     "game_extra": game_extra,
-    "global_load": global_load,
-    "global_set": global_set,
-    "global_reset": global_reset,
     "custom_status": custom_status,
     "custom_set": custom_set,
     "custom_remove": custom_remove,

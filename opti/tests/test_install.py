@@ -1,23 +1,13 @@
 import json
-import os
 import shutil
 import struct
 import tempfile
 import unittest
 from pathlib import Path
 
-from tests.loader import FakeCtx, InvalidArgument, Unavailable, fake_steam, load_backend, submodule, swap_dir
+from tests.loader import FakeCtx, InvalidArgument, Unavailable, fake_game, fake_steam, load_backend, submodule, swap_dir, tree
 
 MARKER = ".invasor-opti.version"
-
-
-def tree(folder):
-    """{relative path: link target, "dir" or file bytes}."""
-    out = {}
-    for p in sorted(Path(folder).rglob("*")):
-        rel = str(p.relative_to(folder))
-        out[rel] = ("-> " + os.readlink(p)) if p.is_symlink() else "dir" if p.is_dir() else p.read_bytes()
-    return out
 
 
 class InstallTest(unittest.TestCase):
@@ -35,18 +25,18 @@ class InstallTest(unittest.TestCase):
         (self.build / "OptiScaler.ini").write_text("[stock]\n")
         (self.build / "setup_linux.sh").write_text("#!/bin/sh\n")
         (self.build / MARKER).write_text(json.dumps({"tag": "nightly-1", "version": "v10", "date": "20261023"}))
-        self.global_ini = self.tmp / "global.ini"
-        self.global_ini.write_text("[global]\n")
+        self.ini = self.tmp / "stock.ini"
+        self.ini.write_text("[stock]\n")
         self.umu = self.tmp / "pfx/umu"
 
     def test_install_into_nothing(self):
-        self.assertEqual(self.i.state(self.umu), {"installed": False, "version": None, "dll": None})
-        self.i.install(self.build, self.umu, self.global_ini, "dxgi", swap_dir)
+        self.assertEqual(self.i.state(self.umu), {"installed": False, "version": None, "dll": None, "flavor": None})
+        self.i.install(self.build, self.umu, self.ini, "dxgi", swap_dir)
         self.assertEqual(tree(self.umu), {
             MARKER: (self.build / MARKER).read_bytes(),
             "OptiScaler": "dir",
             "OptiScaler.dll": b"opti",
-            "OptiScaler.ini": b"[global]\n",
+            "OptiScaler.ini": b"[stock]\n",
             "OptiScaler/libxess.dll": b"xess",
             "dxgi.dll": "-> OptiScaler.dll",
         })
@@ -59,7 +49,7 @@ class InstallTest(unittest.TestCase):
         (self.umu / "other.dll").write_bytes(b"x")
         (self.umu / "OptiScaler").mkdir()
         (self.umu / "OptiScaler/old.dll").write_bytes(b"old")
-        self.i.install(self.build, self.umu, self.global_ini, "winmm", swap_dir)
+        self.i.install(self.build, self.umu, self.ini, "winmm", swap_dir)
         t = tree(self.umu)
         self.assertEqual(t["OptiScaler.ini"], b"[mine]\n")
         self.assertEqual(t["other.dll"], b"x")
@@ -72,7 +62,7 @@ class InstallTest(unittest.TestCase):
         (self.umu / "OptiScaler.dll").write_bytes(b"opti")
         (self.umu / "dxgi.dll").symlink_to("OptiScaler.dll")
         (self.umu / "d3d12.dll").symlink_to("OptiScaler.dll")
-        self.assertEqual(self.i.state(self.umu), {"installed": True, "version": None, "dll": "dxgi"})
+        self.assertEqual(self.i.state(self.umu), {"installed": True, "version": None, "dll": "dxgi", "flavor": "optiscaler"})
         self.i.set_dll(self.umu, "dbghelp")
         self.assertEqual(sorted(tree(self.umu)), ["OptiScaler.dll", "dbghelp.dll"])
         self.assertEqual(self.i.state(self.umu)["dll"], "dbghelp")
@@ -89,9 +79,9 @@ class InstallTest(unittest.TestCase):
         self.umu.mkdir(parents=True)
         (self.umu / "dxgi.dll").write_bytes(b"dxvk")
         with self.assertRaises(self.i.Error):
-            self.i.install(self.build, self.umu, self.global_ini, "dxgi", swap_dir)
+            self.i.install(self.build, self.umu, self.ini, "dxgi", swap_dir)
         self.assertEqual(tree(self.umu), {"dxgi.dll": b"dxvk"})
-        self.i.install(self.build, self.umu, self.global_ini, "d3d12", swap_dir)
+        self.i.install(self.build, self.umu, self.ini, "d3d12", swap_dir)
         with self.assertRaises(self.i.Error):
             self.i.set_dll(self.umu, "dxgi")
         self.i.uninstall(self.umu)
@@ -103,7 +93,7 @@ class InstallTest(unittest.TestCase):
         (self.umu / ".OptiScaler.mine").mkdir()  # the user's, despite its name
         (self.umu / ".OptiScaler.mine/x").write_text("x")
         (self.umu / ".OptiScaler.old-1a2b3c4d").mkdir()  # left by a crash in swap_dir
-        self.i.install(self.build, self.umu, self.global_ini, "dxgi", swap_dir)
+        self.i.install(self.build, self.umu, self.ini, "dxgi", swap_dir)
         self.assertFalse((self.umu / ".OptiScaler.old-1a2b3c4d").exists())
         (self.umu / ".OptiScaler.copy").mkdir()  # left by a crash before the swap
         (self.umu / "d3d12.dll").symlink_to("OptiScaler.dll")
@@ -112,7 +102,7 @@ class InstallTest(unittest.TestCase):
         self.i.uninstall(self.umu)  # nothing left: no error
 
     def test_update_keeps_what_the_build_doesnt_bring(self):
-        self.i.install(self.build, self.umu, self.global_ini, "d3d12", swap_dir)
+        self.i.install(self.build, self.umu, self.ini, "d3d12", swap_dir)
         (self.umu / "OptiScaler.ini").write_text("[edited]\n")
         (self.umu / "OptiScaler/helixsr.dll").write_bytes(b"helix")
         (self.umu / "OptiScaler/plugins").mkdir()
@@ -144,15 +134,15 @@ class InstallTest(unittest.TestCase):
     def test_update_needs_both_ends(self):
         with self.assertRaises(self.i.Error):
             self.i.update(self.build, self.umu)  # not installed
-        self.i.install(self.build, self.umu, self.global_ini, "dxgi", swap_dir)
+        self.i.install(self.build, self.umu, self.ini, "dxgi", swap_dir)
         with self.assertRaises(self.i.Error):
             self.i.update(self.tmp / "nothing", self.umu)
 
     def test_bad_dll_and_no_build(self):
         with self.assertRaises(ValueError):
-            self.i.install(self.build, self.umu, self.global_ini, "../evil", swap_dir)
+            self.i.install(self.build, self.umu, self.ini, "../evil", swap_dir)
         with self.assertRaises(self.i.Error):
-            self.i.install(self.tmp / "nothing", self.umu, self.global_ini, "dxgi", swap_dir)
+            self.i.install(self.tmp / "nothing", self.umu, self.ini, "dxgi", swap_dir)
         with self.assertRaises(self.i.Error):
             self.i.set_dll(self.umu, "dxgi")  # not installed
         self.assertFalse(self.umu.exists())
@@ -225,15 +215,7 @@ class GameInstallTest(unittest.TestCase):
     """The backend's methods: a fake Steam, the Global build and file in a tmp."""
 
     def setUp(self):
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, tmp)
-        steam = tmp / "Steam"
-        (steam / "steamapps/compatdata/42/pfx/drive_c").mkdir(parents=True)
-        self.umu = steam / "steamapps/compatdata/42/pfx/drive_c/windows/system32/umu"
-        self.b = load_backend()
-        self.b.setup(FakeCtx())
-        self.b.GLOBAL_DIR = tmp / "invasor-opti"
-        fake_steam(steam)
+        self.b, tmp, self.umu = fake_game(self)
 
     def make_build(self):
         build = self.b.GLOBAL_DIR / "optiscaler"
@@ -249,8 +231,16 @@ class GameInstallTest(unittest.TestCase):
         self.make_build()
         r = self.b.game_install("42", "d3d12")
         self.assertEqual((r["state"], r["install"]["dll"], r["build"]["tag"]), ("ok", "d3d12", "nightly-1"))
-        # The game got the Global file, which starts as the module's own.
-        self.assertEqual((self.umu / "OptiScaler.ini").read_bytes(), self.b.DEFAULTS["invasor"].read_bytes())
+        # The game got OptiScaler's own file (the build has none) with only OptiDllPath set.
+        stock = self.b.OPTISCALER_INI.read_bytes()
+        self.assertEqual((self.umu / "OptiScaler.ini").read_bytes(),
+                         stock.replace(b"OptiDllPath=auto", rb"OptiDllPath=c:\windows\system32\umu\OptiScaler", 1))
+        # A game's own file stays as it is.
+        self.b.game_uninstall("42")
+        self.umu.mkdir(parents=True)
+        (self.umu / "OptiScaler.ini").write_text("[FrameGen]\nEnabled=false\n")
+        self.b.game_install("42", "d3d12")
+        self.assertEqual((self.umu / "OptiScaler.ini").read_text(), "[FrameGen]\nEnabled=false\n")
         self.assertEqual(self.b.game_set_dll("42", "winmm")["install"]["dll"], "winmm")
         with self.assertRaises(InvalidArgument):
             self.b.game_set_dll("42", "kernel32")

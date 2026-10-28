@@ -4,6 +4,10 @@ from, as WINE_OPTISCALER_NAME=<dll>.dll says. There, <dll>.dll is a link to Opti
 What is OptiScaler's in umu, and nothing else is ever touched: OptiScaler.dll, OptiScaler.ini, the
 OptiScaler folder, MARKER, and each <name>.dll of DLL_NAMES that is a link to OptiScaler.dll (or a
 copy of it). OptiScaler is installed when OptiScaler.dll is there, also when someone put it by hand.
+
+Two flavors, as the build's MARKER says (nightly.flavor): OptiScaler's nightly, and HelixSR Scaler (see
+helixsr.py), which also brings the HelixSR and Licenses folders: those are its own too, only where the game's
+MARKER says it's HelixSR Scaler.
 """
 import filecmp
 import os
@@ -12,12 +16,13 @@ import shutil
 from pathlib import Path
 
 from .files import Error, copy_file
-from .nightly import MAIN_DLL, MARKER, read_marker
+from .nightly import MAIN_DLL, MARKER, SCALER, flavor, read_marker
 
 DLL_NAMES = ("dxgi", "d3d12", "dbghelp", "winmm")
 INI = "OptiScaler.ini"
 FOLDER = "OptiScaler"  # OptiScaler's own folder, next to OptiScaler.dll
-COPY = f".{FOLDER}.copy"  # the build's folder, copied next to the game's before the swap
+SCALER_FOLDERS = ("HelixSR", "Licenses")  # HelixSR Scaler's folders besides FOLDER
+SCALER_KEEP = "HelixSR/helixsr.ini"  # HLX DLSS's settings: a game keeps its own on update
 # Where Wine's OptiScaler hack (GE-Proton, proton-cachyos) loads WINE_OPTISCALER_NAME from, in compatdata/<appid>.
 UMU = Path("pfx/drive_c/windows/system32/umu")
 
@@ -46,9 +51,22 @@ def with_dll(options, dll):
     return f"{word} {options}"
 
 
-def _leftovers(umu):
-    """What a crash left of an install: the copy, and swap_dir's own .OptiScaler.old-*/.new-* (nothing else)."""
-    return [umu / COPY, *umu.glob(f".{FOLDER}.old-*"), *umu.glob(f".{FOLDER}.new-*")]
+def _copy_name(name):
+    """A build's folder, copied next to the game's before the swap."""
+    return f".{name}.copy"
+
+
+def _folders(kind):
+    """The folders a flavor puts in umu."""
+    return (FOLDER, *SCALER_FOLDERS) if kind == SCALER else (FOLDER,)
+
+
+def _leftovers(umu, kind):
+    """What a crash left of an install: the copies, and swap_dir's own .<folder>.old-*/.new-* (nothing else)."""
+    out = []
+    for name in _folders(kind):
+        out += [umu / _copy_name(name), *umu.glob(f".{name}.old-*"), *umu.glob(f".{name}.new-*")]
+    return out
 
 
 def _check_dll(dll):
@@ -74,12 +92,12 @@ def _loaders(umu):
 
 def state(umu):
     """{"installed", "version": the marker (see nightly.read_marker) or None, "dll": the first name
-    that loads OptiScaler or None}."""
+    that loads OptiScaler or None, "flavor": nightly.flavor, or None when not installed}."""
     umu = Path(umu)
     if not (umu / MAIN_DLL).is_file():
-        return {"installed": False, "version": None, "dll": None}
+        return {"installed": False, "version": None, "dll": None, "flavor": None}
     loaders = _loaders(umu)
-    return {"installed": True, "version": read_marker(umu), "dll": loaders[0] if loaders else None}
+    return {"installed": True, "version": read_marker(umu), "dll": loaders[0] if loaders else None, "flavor": flavor(umu)}
 
 
 def _free(umu, dll, main):
@@ -102,48 +120,68 @@ def set_dll(umu, dll):
     (umu / f"{dll}.dll").symlink_to(MAIN_DLL)
 
 
-def install(build, umu, global_ini, dll, swap):
-    """Copy the build (a folder as nightly.update leaves it) into umu: OptiScaler.dll, the
-    OptiScaler folder and its marker; global_ini as OptiScaler.ini unless the game has one; and
-    <dll>.dll linked to OptiScaler.dll. swap(new, target) puts a folder in place at once
-    (ctx.archive.swap_dir)."""
+def has_helixsr_section(path):
+    """True if the ini file has a [HelixSR] section (HelixSR Scaler's)."""
+    try:
+        return re.search(r"^\s*\[HelixSR\]", path.read_text(errors="replace"), re.M | re.I) is not None
+    except OSError:
+        return False
+
+
+def install(build, umu, ini, dll, swap):
+    """Copy the build (a folder as nightly.update or helixsr.store leaves it) into umu: OptiScaler.dll, its
+    folders and its marker; ini as OptiScaler.ini unless the game has one (for HelixSR Scaler, one with
+    [HelixSR]); and <dll>.dll linked to OptiScaler.dll. swap(new, target) puts a folder in place at once
+    (ctx.archive.swap_dir). Refused when OptiScaler (either flavor) is installed already: update it, or
+    uninstall it first."""
     _check_dll(dll)
     build, umu = Path(build), Path(umu)
     if not (build / MAIN_DLL).is_file():
         raise Error("There is no OptiScaler to install: download it in Global first")
+    kind = flavor(build)
     main = umu / MAIN_DLL
-    _free(umu, dll, main if main.is_file() else build / MAIN_DLL)
+    if main.is_file():
+        raise Error("OptiScaler is already installed in this game: update it, or uninstall it first")
+    _free(umu, dll, build / MAIN_DLL)
     umu.mkdir(parents=True, exist_ok=True)
-    for leftover in _leftovers(umu):
+    for leftover in _leftovers(umu, kind):
         shutil.rmtree(leftover, ignore_errors=True)
-    if (build / FOLDER).is_dir():
-        new = umu / COPY
-        shutil.copytree(build / FOLDER, new)
-        swap(new, umu / FOLDER)
+    for name in _folders(kind):
+        if (build / name).is_dir():
+            new = umu / _copy_name(name)
+            shutil.copytree(build / name, new)
+            swap(new, umu / name)
     copy_file(build / MAIN_DLL, main)
+    if (umu / INI).exists() and kind == SCALER and not has_helixsr_section(umu / INI):
+        os.replace(umu / INI, umu / f"{INI}.bak")  # another OptiScaler's settings: kept aside, never lost
     if not (umu / INI).exists():
-        copy_file(global_ini, umu / INI)
+        copy_file(ini, umu / INI)
     set_dll(umu, dll)
     if (build / MARKER).is_file():
         copy_file(build / MARKER, umu / MARKER)
 
 
 def update(build, umu):
-    """Put the build's files over the game's: OptiScaler.dll, every file of the OptiScaler folder, and the
-    marker. Whatever the build doesn't bring stays: the game's OptiScaler.ini, its DLL name, the custom DLLs
-    and anything the user added to the folder. A DLL name that was a copy of OptiScaler.dll becomes a link,
-    so it loads the new one."""
+    """Put the build's files over the game's: OptiScaler.dll, every file of its folders, and the marker.
+    Whatever the build doesn't bring stays: the game's OptiScaler.ini (and HelixSR/helixsr.ini), its DLL name,
+    the custom DLLs and anything the user added to the folders. A DLL name that was a copy of OptiScaler.dll
+    becomes a link, so it loads the new one. The build must be the game's flavor."""
     build, umu = Path(build), Path(umu)
     if not (build / MAIN_DLL).is_file():
         raise Error("There is no OptiScaler to install: download it in Global first")
     if not (umu / MAIN_DLL).is_file():
         raise Error("OptiScaler isn't installed in this game")
+    kind = flavor(build)
+    if flavor(umu) != kind:
+        raise Error("This game has another OptiScaler: uninstall it and install this one")
     loaders = _loaders(umu)  # before OptiScaler.dll changes: a copy of the old one wouldn't match the new
-    for src in sorted((build / FOLDER).rglob("*")):
-        if src.is_file():
-            dest = umu / FOLDER / src.relative_to(build / FOLDER)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            copy_file(src, dest)
+    for name in _folders(kind):
+        for src in sorted((build / name).rglob("*")):
+            rel = src.relative_to(build)
+            if src.is_file() and not (str(rel) == SCALER_KEEP and (umu / rel).exists()):
+                dest = umu / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                copy_file(src, dest)
     copy_file(build / MAIN_DLL, umu / MAIN_DLL)
     for name in loaders:
         link = umu / f"{name}.dll"
@@ -158,13 +196,14 @@ def uninstall(umu):
     """Remove OptiScaler's files from umu (see the top of this file); anything else stays. An umu
     left empty goes too."""
     umu = Path(umu)
+    kind = flavor(umu)  # before its marker goes
     for name in _loaders(umu):
         (umu / f"{name}.dll").unlink()
     for name in (MAIN_DLL, INI, MARKER):
         p = umu / name
         if p.is_file() or p.is_symlink():
             p.unlink()
-    for p in [umu / FOLDER, *_leftovers(umu)]:
+    for p in [*(umu / name for name in _folders(kind)), *_leftovers(umu, kind)]:
         if p.is_symlink():
             p.unlink()
         elif p.is_dir():

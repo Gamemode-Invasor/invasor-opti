@@ -1,12 +1,10 @@
 """OptiScaler.ini files that aren't tidy: the module must read any of them, show what it can and
 change one value without breaking anything else."""
 import os
-import shutil
-import tempfile
 import unittest
 from pathlib import Path
 
-from tests.loader import FakeCtx, InvalidArgument, Unavailable, fake_steam, load_backend, submodule
+from tests.loader import InvalidArgument, Unavailable, fake_game, load_backend, submodule
 
 
 def keys(ini, text):
@@ -118,15 +116,9 @@ class BrokenFileTest(unittest.TestCase):
     """The file itself: missing, a folder, a symlink, huge, unreadable."""
 
     def setUp(self):
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, tmp)
-        steam = tmp / "Steam"
-        self.umu = steam / "steamapps/compatdata/42/pfx/drive_c/windows/system32/umu"
+        self.b, _, self.umu = fake_game(self)
         self.umu.mkdir(parents=True)
         self.path = self.umu / "OptiScaler.ini"
-        self.b = load_backend()
-        self.b.setup(FakeCtx())
-        fake_steam(steam)
 
     def test_folder_named_like_the_ini(self):
         self.path.mkdir()
