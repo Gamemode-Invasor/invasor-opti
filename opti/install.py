@@ -22,7 +22,12 @@ DLL_NAMES = ("dxgi", "d3d12", "dbghelp", "winmm")
 INI = "OptiScaler.ini"
 FOLDER = "OptiScaler"  # OptiScaler's own folder, next to OptiScaler.dll
 SCALER_FOLDERS = ("HelixSR", "Licenses")  # HelixSR Scaler's folders besides FOLDER
-SCALER_KEEP = "HelixSR/helixsr.ini"  # HLX DLSS's settings: a game keeps its own on update
+# The settings of HelixSR's upscalers (HLX DLSS, Preset K, HLX FSR 4 Full): a game keeps its own on update.
+SCALER_KEEP = (
+    "HelixSR/helixsr.ini",
+    "HelixSR/k/helixsr.ini",
+    "OptiScaler/custom/HLX FSR 4 Full/ffx/hlx_fsr4.ini",
+)
 # Where Wine's OptiScaler hack (GE-Proton, proton-cachyos) loads WINE_OPTISCALER_NAME from, in compatdata/<appid>.
 UMU = Path("pfx/drive_c/windows/system32/umu")
 
@@ -163,7 +168,7 @@ def install(build, umu, ini, dll, swap):
 
 def update(build, umu):
     """Put the build's files over the game's: OptiScaler.dll, every file of its folders, and the marker.
-    Whatever the build doesn't bring stays: the game's OptiScaler.ini (and HelixSR/helixsr.ini), its DLL name,
+    Whatever the build doesn't bring stays: the game's OptiScaler.ini (and SCALER_KEEP's settings files), its DLL name,
     the DLLs turned on and anything the user added to the folders. A DLL name that was a copy of OptiScaler.dll
     becomes a link, so it loads the new one. The build must be the game's flavor."""
     build, umu = Path(build), Path(umu)
@@ -178,7 +183,7 @@ def update(build, umu):
     for name in _folders(kind):
         for src in sorted((build / name).rglob("*")):
             rel = src.relative_to(build)
-            if src.is_file() and not (str(rel) == SCALER_KEEP and (umu / rel).exists()):
+            if src.is_file() and not (rel.as_posix() in SCALER_KEEP and (umu / rel).exists()):
                 dest = umu / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 copy_file(src, dest)

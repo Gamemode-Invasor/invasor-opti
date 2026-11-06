@@ -7,5 +7,31 @@
   "description": "OptiScaler and HelixSR Scaler from the panel: get the latest nightly or compile HelixSR Scaler (HLX DLSS and HLX FSR 4), install either in the selected game with AMD's and NVIDIA's DLLs, and edit its OptiScaler.ini, every option with its description.",
   "order": 45,
   "tab": "Opti",
-  "no_qam": true
+  "no_qam": true,
+  "settings": [
+    {
+      "key": "helixsr_channel",
+      "type": "select",
+      "label": "HelixSR version",
+      "default": "stable",
+      "hint": "Which HelixSR Download and compile gets: the latest stable release, or the newest of all (a prerelease, with the newest features and less testing)",
+      "options": [
+        {
+          "value": "stable",
+          "label": "Stable"
+        },
+        {
+          "value": "prerelease",
+          "label": "Prerelease"
+        }
+      ]
+    },
+    {
+      "key": "helixsr_preset_k",
+      "type": "toggle",
+      "label": "Build Preset K too",
+      "default": false,
+      "hint": "WARNING: Experimental. This model takes a very long time to build and isn't stable yet. Preset K for HLX DLSS (HelixSR 3.2 and later) is meant to be sharper than Model E, but it can look worse; its author tested it on AMD RDNA GPUs only"
+    }
+  ]
 }

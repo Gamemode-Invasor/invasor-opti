@@ -1,4 +1,5 @@
 import hashlib
+import json
 import importlib
 import importlib.util
 import itertools
@@ -96,6 +97,17 @@ class FakeSteam:
         return {"applied": True, "verified": True}
 
 
+class FakeSettings:
+    """ctx.settings: the defaults of module.json, and `values` over them."""
+
+    def __init__(self):
+        schema = json.loads((Path(__file__).resolve().parents[1] / "module.json").read_text())["settings"]
+        self.values = {f["key"]: f["default"] for f in schema}
+
+    def get(self, key=None):
+        return dict(self.values) if key is None else self.values[key]
+
+
 class FakeCtx:
     """What the backend uses of the core's ctx in these tests: the core's own paths, vdf and archive."""
     InvalidArgument = InvalidArgument
@@ -109,6 +121,7 @@ class FakeCtx:
     def __init__(self):
         self.http = FakeHttp()
         self.steam = FakeSteam()
+        self.settings = FakeSettings()
 
     def task(self, label):
         raise Unavailable("no Tasks panel in the tests")  # the backend's plan B

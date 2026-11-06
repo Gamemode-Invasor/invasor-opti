@@ -120,6 +120,41 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(t["d3d12.dll"], "-> OptiScaler.dll")
         self.assertEqual(self.i.state(self.umu)["version"]["tag"], "nightly-2")
 
+    def test_update_keeps_the_settings_of_helixsrs_upscalers(self):
+        """HelixSR Scaler: the three settings files a game may have edited stay; everything else is the build's."""
+        ini = {
+            "HelixSR/helixsr.ini": "HLX DLSS",
+            "HelixSR/k/helixsr.ini": "Preset K",
+            "OptiScaler/custom/HLX FSR 4 Full/ffx/hlx_fsr4.ini": "HLX FSR 4 Full",
+        }
+        dll = {"HelixSR/helixsr.dll": b"dlss", "HelixSR/k/helixsr_modelk_weights.bin": b"k",
+               "OptiScaler/custom/HLX FSR 4 Full/ffx/amd_fidelityfx_upscaler_dx12.dll": b"full"}
+        for rel in (*ini, *dll):
+            (self.build / rel).parent.mkdir(parents=True, exist_ok=True)
+        for rel, text in ini.items():
+            (self.build / rel).write_text(f"{text} default\n")
+        for rel, data in dll.items():
+            (self.build / rel).write_bytes(data)
+        (self.build / "Licenses").mkdir()
+        (self.build / MARKER).write_text(json.dumps({"tag": "v3.2.1", "flavor": "helixsr-scaler"}))
+        self.i.install(self.build, self.umu, self.ini, "dxgi", swap_dir)
+        for rel, text in ini.items():
+            (self.umu / rel).write_text(f"{text} mine\n")
+        for rel in dll:
+            (self.build / rel).write_bytes(b"new")
+        for rel, text in ini.items():
+            (self.build / rel).write_text(f"{text} new default\n")
+        self.i.update(self.build, self.umu)
+        t = tree(self.umu)
+        for rel, text in ini.items():
+            self.assertEqual(t[rel], f"{text} mine\n".encode(), rel)
+        for rel in dll:
+            self.assertEqual(t[rel], b"new", rel)
+        # A settings file the game doesn't have yet comes from the build.
+        (self.umu / "HelixSR/k/helixsr.ini").unlink()
+        self.i.update(self.build, self.umu)
+        self.assertEqual((self.umu / "HelixSR/k/helixsr.ini").read_text(), "Preset K new default\n")
+
     def test_update_turns_a_copy_into_a_link(self):
         # Put there by hand: dxgi.dll a copy of OptiScaler.dll, no marker.
         self.umu.mkdir(parents=True)

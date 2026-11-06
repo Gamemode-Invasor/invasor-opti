@@ -234,21 +234,86 @@ class HelixBuildTest(unittest.TestCase):
         self.assertEqual((s["busy"], s["error"], s["installed"]["tag"]), (False, None, "v3.1.0"))
         self.assertEqual([p.name for p in self.b.GLOBAL_DIR.iterdir()], ["helixsr"])  # no build folder left
 
+    def test_arguments_of_the_script(self):
+        """Preset K and the channel go to the script as arguments (no shell); by default stable, without Preset K."""
+        args = self.tmp / "args"
+        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\n')
+        path = self.b.HELIXSR_SCRIPT
+        path.write_text(f'echo "$@" > "{args}"\n' + path.read_text())  # before the script shifts them away
+        self.b.helixsr_build()
+        self.assertIsNone(self.wait()["error"])
+        self.assertEqual(args.read_text().split()[:3], ["--yes", "--channel", "stable"])
+        self.assertNotIn("--preset-k", args.read_text())
+        self.b.helixsr_build(preset_k=True, channel="prerelease")
+        self.assertIsNone(self.wait()["error"])
+        self.assertEqual(args.read_text().split()[:5], ["--yes", "--channel", "prerelease", "--preset-k", "--out"])
+
+    def test_the_settings_are_the_default(self):
+        """Without arguments the build takes the module's settings (what the panel shows); an argument wins."""
+        args = self.tmp / "args"
+        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\n')
+        path = self.b.HELIXSR_SCRIPT
+        path.write_text(f'echo "$@" > "{args}"\n' + path.read_text())
+        self.ctx.settings.values.update(helixsr_channel="prerelease", helixsr_preset_k=True)
+        self.b.helixsr_build()
+        self.assertIsNone(self.wait()["error"])
+        self.assertEqual(args.read_text().split()[:4], ["--yes", "--channel", "prerelease", "--preset-k"])
+        self.b.helixsr_build(preset_k=False, channel="stable")
+        self.assertIsNone(self.wait()["error"])
+        self.assertEqual(args.read_text().split()[:3], ["--yes", "--channel", "stable"])
+        self.assertNotIn("--preset-k", args.read_text())
+
+    def test_unreadable_settings_mean_stable_without_preset_k(self):
+        args = self.tmp / "args"
+        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\n')
+        path = self.b.HELIXSR_SCRIPT
+        path.write_text(f'echo "$@" > "{args}"\n' + path.read_text())
+        self.ctx.settings = types.SimpleNamespace(get=lambda key=None: (_ for _ in ()).throw(Unavailable("no settings")))
+        self.b.helixsr_build()
+        self.assertIsNone(self.wait()["error"])
+        self.assertEqual(args.read_text().split()[:3], ["--yes", "--channel", "stable"])
+        self.assertNotIn("--preset-k", args.read_text())
+
+    def test_the_stage_text_says_preset_k_takes_longer(self):
+        line = "[helixsr-fetch] building HelixSR (it can take several minutes)..."
+        self.assertEqual(self.b._helixsr_stage(line)[1], "Building (it can take several minutes)")
+        self.assertEqual(self.b._helixsr_stage(line, True)[1], "Building (it can take much longer with Preset K)")
+        self.assertIsNone(self.b._helixsr_stage("downloading..."))  # not the script's own line
+
+    def test_bad_arguments(self):
+        self.script("exit 0\n")
+        for kwargs in ({"preset_k": "yes"}, {"preset_k": 1}, {"channel": "nightly"}, {"channel": ""}):
+            with self.assertRaises(InvalidArgument):
+                self.b.helixsr_build(**kwargs)
+        self.assertFalse(self.b._helix.locked())
+
+    def test_status_says_if_the_build_has_preset_k(self):
+        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\n')
+        self.b.helixsr_build()
+        self.assertFalse(self.wait()["preset_k"])
+        k = self.tmp / "made-k"
+        make_out(k)
+        (k / "HelixSR/k").mkdir()
+        (k / "HelixSR/k/helixsr.dll").write_bytes(b"k")
+        self.script(f'cp -a "{k}/." "$OUT/"\n')
+        self.b.helixsr_build(preset_k=True)
+        self.assertTrue(self.wait()["preset_k"])
+        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\n')
+        self.b.helixsr_build()  # without it: the earlier build's folder goes with the build
+        self.assertFalse(self.wait()["preset_k"])
+
     def dll_script(self):
-        """The build leaves AMD's and NVIDIA's DLLs next to HelixSR Scaler, as helixsr-fetch.sh does."""
-        (self.tmp / "made-amd.dll").write_bytes(fake_dll("AMD from the build", (2, 4, 0, 4370)))
+        """The build leaves NVIDIA's DLL next to HelixSR Scaler, as helixsr-fetch.sh does."""
         (self.tmp / "made-nv.dll").write_bytes(fake_dll("NVIDIA from the build", (3, 10, 7, 0)))
-        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\ncp "{self.tmp}/made-amd.dll" "$OUT/amdxcffx64.dll"\n'
-                    f'cp "{self.tmp}/made-nv.dll" "$OUT/nvngx_dlss.dll"\n')
+        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\ncp "{self.tmp}/made-nv.dll" "$OUT/nvngx_dlss.dll"\n')
 
     def test_keeps_the_dlls_when_there_are_none(self):
         self.dll_script()
         self.b.helixsr_build()
         self.assertIsNone(self.wait()["error"])
         kept = self.b.dlls_status()
-        self.assertEqual((kept["amdxcffx64"]["product"], kept["nvngx_dlss"]["product"]), ("AMD from the build", "NVIDIA from the build"))
-        for name in ("amdxcffx64.dll", "nvngx_dlss.dll"):
-            self.assertFalse((self.b._helixsr_dir() / name).exists())  # not in HelixSR Scaler's tree
+        self.assertEqual((kept["nvngx_dlss"]["product"], kept["amdxcffx64"]), ("NVIDIA from the build", None))
+        self.assertFalse((self.b._helixsr_dir() / "nvngx_dlss.dll").exists())  # not in HelixSR Scaler's tree
 
     def test_a_kept_dll_stays(self):
         (self.tmp / "nvngx_dlss.dll").write_bytes(fake_dll("mine", (3, 8, 0, 0)))
@@ -257,10 +322,10 @@ class HelixBuildTest(unittest.TestCase):
         self.b.helixsr_build()
         self.assertIsNone(self.wait()["error"])
         kept = self.b.dlls_status()
-        self.assertEqual((kept["nvngx_dlss"]["product"], kept["amdxcffx64"]["product"]), ("mine", "AMD from the build"))
+        self.assertEqual(kept["nvngx_dlss"]["product"], "mine")
 
     def test_a_bad_dll_fails_nothing(self):
-        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\necho junk > "$OUT/amdxcffx64.dll"\necho junk > "$OUT/nvngx_dlss.dll"\n')
+        self.script(f'cp -a "{self.tmp}/made/." "$OUT/"\necho junk > "$OUT/nvngx_dlss.dll"\n')
         self.b.helixsr_build()
         s = self.wait()
         self.assertEqual((s["error"], s["installed"]["tag"]), (None, "v3.1.0"))
@@ -285,7 +350,7 @@ class HelixBuildTest(unittest.TestCase):
         self.assertEqual(self.b.helixsr_build(), {"started": False, "busy": True})
         self.b.teardown()
         self.assertFalse(self.b._helix_thread.is_alive())
-        self.assertEqual(self.b.helixsr_status(), {"installed": None, "busy": False, "error": "Build stopped"})
+        self.assertEqual(self.b.helixsr_status(), {"installed": None, "preset_k": False, "busy": False, "error": "Build stopped"})
 
     def test_not_while_a_game_runs(self):
         self.script("exit 0\n")
@@ -295,7 +360,7 @@ class HelixBuildTest(unittest.TestCase):
 
 
 class HelixCheckTest(unittest.TestCase):
-    """backend: helixsr_check compares the kept build with GitHub's latest stable tag (cached)."""
+    """backend: helixsr_check compares the kept build with GitHub's latest tag of a channel (cached per channel)."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -306,9 +371,16 @@ class HelixCheckTest(unittest.TestCase):
         self.http = self.b.ctx.http
         self.answer("v3.1.0")
 
-    def answer(self, tag):
-        """GitHub's answer for the latest stable HelixSR (None: offline)."""
-        self.http.answers[self.b.HELIXSR_RELEASE_API] = Unavailable("couldn't get it: offline") if tag is None else {"tag_name": tag}
+    def answer(self, tag, channel="stable"):
+        """GitHub's answer for a channel (None: offline): stable is a release, prerelease a list newest first
+        with a draft before the one that counts."""
+        if tag is None:
+            answer = Unavailable("couldn't get it: offline")
+        elif channel == "stable":
+            answer = {"tag_name": tag}
+        else:
+            answer = [{"tag_name": "v9.9.9", "draft": True}, {"tag_name": tag, "prerelease": True}, {"tag_name": "v0.0.1"}]
+        self.http.answers[self.b.HELIXSR_API[channel]] = answer
 
     @property
     def asked(self):
@@ -323,7 +395,7 @@ class HelixCheckTest(unittest.TestCase):
     def test_up_to_date_and_older(self):
         self.keep("v3.1.0")
         self.assertEqual(self.b.helixsr_check(), {"installed": "3.1.0", "latest": "v3.1.0", "update": False})
-        self.b._latest_cache["ttl"] = 0  # the hour is over
+        self.b._latest_cache["stable"]["ttl"] = 0  # the hour is over
         self.answer("v3.1.1")
         self.assertTrue(self.b.helixsr_check()["update"])
 
@@ -334,10 +406,29 @@ class HelixCheckTest(unittest.TestCase):
         self.answer("v3.1.0")
         self.b.helixsr_check()
         self.assertEqual(self.asked, 1)  # a failed check waits before asking again
-        self.b._latest_cache["ttl"] = 0  # the retry wait is over
+        self.b._latest_cache["stable"]["ttl"] = 0  # the retry wait is over
         self.assertTrue(self.b.helixsr_check()["update"])
         self.b.helixsr_check()
         self.assertEqual(self.asked, 2)
+
+    def test_channels(self):
+        """Stable and prerelease are asked apart, each with its own cache; a draft never counts."""
+        self.answer("v3.2.1", "prerelease")
+        self.assertEqual(self.b.helixsr_check("prerelease")["latest"], "v3.2.1")
+        self.assertEqual(self.b.helixsr_check()["latest"], "v3.1.0")
+        self.assertEqual(self.b.helixsr_check("prerelease")["latest"], "v3.2.1")
+        self.assertEqual(self.asked, 2)  # one question per channel
+        self.keep("v3.1.0")
+        self.assertFalse(self.b.helixsr_check()["update"])
+        self.assertTrue(self.b.helixsr_check("prerelease")["update"])
+        with self.assertRaises(InvalidArgument):
+            self.b.helixsr_check("nightly")
+        self.b.ctx.settings.values["helixsr_channel"] = "prerelease"  # no argument: the setting
+        self.assertEqual(self.b.helixsr_check()["latest"], "v3.2.1")
+
+    def test_a_draft_is_not_a_release(self):
+        self.http.answers[self.b.HELIXSR_API["stable"]] = {"tag_name": "v9.9.9", "draft": True}
+        self.assertIsNone(self.b.helixsr_check()["latest"])
 
 
 if __name__ == "__main__":

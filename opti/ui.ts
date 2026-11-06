@@ -42,9 +42,9 @@ interface DllFile {
 type DllsStatus = Record<string, DllFile | null>;
 
 // AMD's and NVIDIA's DLLs the user brings, one slot each (kept by the module, turned on per game; HelixSR Scaler
-// gets the AMD ones when it's installed, and compiling HelixSR keeps amdxcffx64.dll and nvngx_dlss.dll).
+// gets the AMD ones when it's installed, and compiling HelixSR keeps nvngx_dlss.dll).
 const SLOTS = [
-  { id: "amdxcffx64", vendor: "amd", file: "amdxcffx64.dll", title: "AMD FSR 4 (DirectX 12)", hint: "From AMD's driver: FSR 4 in DirectX 12 games (compiling HelixSR keeps AMD's when there's none)" },
+  { id: "amdxcffx64", vendor: "amd", file: "amdxcffx64.dll", title: "AMD FSR 4 (DirectX 12)", hint: "From AMD's driver: FSR 4 in DirectX 12 games" },
   { id: "amdvkffx64", vendor: "amd", file: "amdvkffx64.dll", title: "AMD FSR 4 (Vulkan)", hint: "From AMD's driver: FSR 4 in Vulkan games (INT8 RDNA2 and INT8 Lite)" },
   { id: "nvngx_dlss", vendor: "nvidia", file: "nvngx_dlss.dll", title: "NVIDIA DLSS", hint: "NVIDIA's DLSS DLL: games that use DLSS without Streamline (Unreal Engine 4) offer DLSS only with it next to OptiScaler (compiling HelixSR keeps NVIDIA's when there's none)" },
   { id: "nvngx_dlssd", vendor: "nvidia", file: "nvngx_dlssd.dll", title: "NVIDIA DLSS Ray Reconstruction", hint: "NVIDIA's DLSS Ray Reconstruction DLL" },
@@ -500,6 +500,7 @@ async function uninstallGame(ctx: ModuleCtx, appid: string, flavor: string | nul
 /** nightly_status and helixsr_status: the build Global has, whether a download or build runs, why the last one failed. */
 interface BuildStatus {
   installed: Build | null;
+  preset_k: boolean; // the kept build has Preset K
   busy: boolean;
   error: string | null;
 }
@@ -515,11 +516,12 @@ interface HelixCheck {
 const BUILD_LABEL = "Download and compile";
 
 /** The build button's label and the line above it, from the last check (null: not checked yet). */
-function buildText(check: HelixCheck | null): { label: string; line: string } {
+function buildText(check: HelixCheck | null, channel: string): { label: string; line: string } {
   if (!check?.latest) return { label: BUILD_LABEL, line: "" };
-  if (!check.installed) return { label: BUILD_LABEL, line: `Latest stable HelixSR: ${check.latest}` };
+  const kind = channel === "prerelease" ? "the newest HelixSR (a prerelease may be it)" : "the latest stable HelixSR";
+  if (!check.installed) return { label: BUILD_LABEL, line: `${channel === "prerelease" ? "Newest" : "Latest stable"} HelixSR: ${check.latest}` };
   if (check.update) return { label: `Update to ${check.latest}`, line: `HelixSR ${check.latest} is out` };
-  return { label: "Recompile", line: `Up to date: ${check.latest} is the latest stable HelixSR` };
+  return { label: "Recompile", line: `Up to date: ${check.latest} is ${kind}` };
 }
 
 /**
@@ -603,17 +605,23 @@ const nightlyBox = new NightlyBox();
 
 /**
  * The "HelixSR" group in Global: the HelixSR Scaler compiled (with HLX DLSS and HLX FSR 4) and a button to
- * compile the latest stable HelixSR (the build runs in the backend, followed until it ends). Built once per panel.
+ * compile the latest HelixSR, a prerelease too (the build runs in the backend, followed until it ends). Built once per panel.
  */
 class HelixBox {
   el: HTMLElement | null = null;
   private open = false;
   private version: HTMLElement | null = null;
   private build: ReturnType<typeof ui.button> | null = null;
+  private channelSelect: ReturnType<typeof ui.select<string>> | null = null;
+  private kToggle: ReturnType<typeof ui.toggle> | null = null;
   private latest: HTMLElement | null = null;
   private problem: HTMLElement | null = null;
   private installed: Build | null = null;
+  private presetK = false; // the kept build has Preset K
+  private channel = "stable"; // module.json helixsr_channel: "stable" or "prerelease"
+  private wantK = false; // module.json helixsr_preset_k
   private check: HelixCheck | null = null;
+  private checkSeq = 0; // of the last question about the latest HelixSR: older answers are dropped
   private error: string | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private busy = false;
@@ -623,38 +631,115 @@ class HelixBox {
     this.version = ui.info("Looking for the compiled version…");
     this.build = ui.button({
       label: BUILD_LABEL,
-      hint: "The latest stable HelixSR from github.com/lonewolf0622/HelixSR, built on this device: HelixSR Scaler with HLX DLSS and HLX FSR 4",
+      hint: "HelixSR from github.com/lonewolf0622/HelixSR (the version you choose above), built on this device: HelixSR Scaler with HLX DLSS and HLX FSR 4, and Preset K if you turn it on",
       onClick: () => void this.startBuild(ctx),
     });
     this.latest = ui.info("");
     this.latest.hidden = true;
     this.problem = ui.info("");
     this.problem.hidden = true;
-    this.el = foldable("HelixSR", [this.version, this.latest, this.build, this.problem], this.open, (open) => void (this.open = open));
+    this.channelSelect = ui.select<string>({
+      label: "HelixSR version",
+      value: this.channel,
+      options: [
+        { value: "stable", label: "Stable" },
+        { value: "prerelease", label: "Prerelease" },
+      ],
+      hint: "Stable: the latest stable release. Prerelease: the newest of all, with the newest features and less testing",
+      onChange: (v) => void this.setChannel(ctx, v),
+    });
+    this.kToggle = ui.toggle({
+      label: "Build Preset K too",
+      value: this.wantK,
+      hint: "WARNING: Experimental. This model takes a very long time to build and isn't stable yet. Preset K for HLX DLSS (HelixSR 3.2 and later) is meant to be sharper than Model E, but it can look worse; its author tested it on AMD RDNA GPUs only",
+      onChange: (on) => void this.saveK(ctx, on),
+    });
+    this.el = foldable(
+      "HelixSR",
+      [this.version, this.channelSelect, this.kToggle, this.latest, this.build, this.problem],
+      this.open,
+      (open) => void (this.open = open),
+    );
     this.showBuild(this.busy, this.error);
     return this.el;
   }
 
   reset() {
     clearTimeout(this.timer);
-    this.el = this.version = this.build = this.latest = this.problem = null;
+    this.el = this.version = this.build = this.latest = this.problem = this.channelSelect = this.kToggle = null;
     this.installed = this.check = this.error = null;
+    this.presetK = false;
     this.open = false;
     this.busy = false;
   }
 
   refresh(ctx: ModuleCtx) {
     void this.refreshBuild(ctx);
+    void this.refreshSettings(ctx).then(() => this.refreshCheck(ctx));
+  }
+
+  /**
+   * The two choices the module keeps (module.json settings): which HelixSR, and Preset K. The backend reads
+   * the same settings when it builds, so what's shown is what's built. False when they can't be read.
+   */
+  private async refreshSettings(ctx: ModuleCtx) {
+    try {
+      const s = await ctx.settings.get();
+      this.channel = s.helixsr_channel === "prerelease" ? "prerelease" : "stable";
+      this.wantK = s.helixsr_preset_k === true;
+    } catch {
+      return false; // what's shown stays
+    }
+    this.channelSelect?.set(this.channel);
+    this.kToggle?.set(this.wantK);
+    return true;
+  }
+
+  /** Keep a setting; when that fails the control goes back to what is kept (and says so). */
+  private async save(ctx: ModuleCtx, key: string, value: string | boolean, revert: () => void) {
+    try {
+      await ctx.settings.set(key, value);
+      return true;
+    } catch (e) {
+      ctx.toast(errorText(e), "error");
+      revert();
+      return false;
+    }
+  }
+
+  private async setChannel(ctx: ModuleCtx, channel: string) {
+    const before = this.channel;
+    this.channel = channel;
+    this.check = null;
+    this.showBuild(this.busy, this.error);
+    await this.save(ctx, "helixsr_channel", channel, () => {
+      this.channel = before;
+      this.channelSelect?.set(before);
+    });
     void this.refreshCheck(ctx);
+  }
+
+  private async saveK(ctx: ModuleCtx, on: boolean) {
+    const before = this.wantK;
+    this.wantK = on;
+    await this.save(ctx, "helixsr_preset_k", on, () => {
+      this.wantK = before;
+      this.kToggle?.set(before);
+    });
   }
 
   /** Is there a newer HelixSR? The backend asks GitHub at most once an hour; offline, the button just builds. */
   private async refreshCheck(ctx: ModuleCtx) {
+    const channel = this.channel;
+    const seq = ++this.checkSeq;
+    let check: HelixCheck | null;
     try {
-      this.check = await ctx.call<HelixCheck>("helixsr_check");
+      check = await ctx.call<HelixCheck>("helixsr_check", { channel });
     } catch {
-      this.check = null;
+      check = null;
     }
+    if (seq !== this.checkSeq) return; // a newer question (another channel) is on its way: its answer counts
+    this.check = check;
     this.showBuild(this.busy, this.error);
   }
 
@@ -669,12 +754,13 @@ class HelixBox {
     }
     const finished = this.busy && !s.busy;
     this.installed = s.installed;
+    this.presetK = s.preset_k;
     this.showBuild(s.busy, s.error);
     if (finished) {
       ctx.toast(s.error ? `HelixSR: ${s.error}` : `HelixSR ${s.installed?.tag ?? ""} compiled`, s.error ? "error" : "ok");
       if (!s.error) {
         void this.refreshCheck(ctx);
-        void dllsBox.refresh(ctx); // the build may have kept AMD's and NVIDIA's DLLs there
+        void dllsBox.refresh(ctx); // the build may have kept NVIDIA's DLL there
         void renderGame(ctx, true); // its Install button depends on it
       }
     }
@@ -686,11 +772,11 @@ class HelixBox {
     this.error = error;
     if (!this.build || !this.problem || !this.version) return;
     this.version.textContent = this.installed
-      ? `Compiled: HelixSR Scaler (HelixSR ${this.installed.tag})`
+      ? `Compiled: HelixSR Scaler (HelixSR ${this.installed.tag}${this.presetK ? ", with Preset K" : ""})`
       : "HelixSR isn't compiled yet.";
     this.problem.textContent = error ?? "";
     this.problem.hidden = !error || busy;
-    const text = buildText(this.check);
+    const text = buildText(this.check, this.channel);
     if (this.latest) {
       this.latest.textContent = text.line;
       this.latest.hidden = !text.line || busy;
@@ -700,13 +786,19 @@ class HelixBox {
   }
 
   private async startBuild(ctx: ModuleCtx) {
+    if (!(await this.refreshSettings(ctx))) {
+      ctx.toast("Can't read the settings: try again", "error");
+      return;
+    }
+    const pre = this.channel === "prerelease";
+    const k = this.wantK;
     const ok = await ui.confirm(
-      "Download the latest stable HelixSR and compile it on this device? It takes several minutes. To build it, NVIDIA's DLSS DLL and AMD's driver package (about 420 MB, only its FSR 4 file is read) are downloaded and used once, under their licenses; both are kept in DLLs when it has none of them. The DLLs you get are for this device only: don't share them. It replaces the module's HelixSR Scaler; games that have it keep theirs until you update them.",
+      `Download ${pre ? "the newest HelixSR (it can be a prerelease, less tested)" : "the latest stable HelixSR"} and compile it on this device? ${k ? "It takes a very long time: Preset K is built too (experimental, not stable yet)." : "It takes several minutes."} To build it, NVIDIA's DLSS DLL is downloaded and used once, under its license; it's kept in DLLs when that has none. The DLLs you get are for this device only: don't share them. It replaces the module's HelixSR Scaler${k ? "" : " (and its Preset K, if it had one)"}; games that have it keep theirs until you update them.`,
       { ok: "Compile" },
     );
     if (!ok) return;
     try {
-      const r = await ctx.call<{ started: boolean; busy: boolean }>("helixsr_build");
+      const r = await ctx.call<{ started: boolean; busy: boolean }>("helixsr_build"); // the backend reads the settings shown above
       if (r.started) {
         this.busy = true;
         ctx.toast("Compiling HelixSR");
