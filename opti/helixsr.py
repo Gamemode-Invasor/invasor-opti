@@ -1,12 +1,12 @@
 """HelixSR Scaler built on this device by bin/helixsr-fetch.sh: OptiScaler with HelixSR's upscalers (HLX DLSS and
 HLX FSR 4), kept as the nightly is (see nightly.py), as a game's umu folder lays it out:
 
-    OptiScaler.dll, OptiScaler.ini, OptiScaler/ (HLX FSR 4 with AMD's FSR next to it), Licenses/
+    OptiScaler.dll, OptiScaler.ini, OptiScaler/ (HLX FSR 4, shipped built, with AMD's FSR next to it and custom/), Licenses/
     HelixSR/helixsr.dll, HelixSR/helixsr.ini (HLX DLSS)
     MARKER  which build it is, with "flavor": SCALER
 
-The script leaves that in a folder, plus VERSION (its tag) and AMD's amdxcffx64.dll and NVIDIA's nvngx_dlss.dll
-when the setup got them (the backend takes them out for the DLLs first); store() checks the rest and swaps it in.
+The script leaves that in a folder, plus VERSION (its tag) and NVIDIA's nvngx_dlss.dll when the setup got it (the
+backend takes it out for the DLLs first); store() checks the rest and swaps it in.
 """
 import json
 from pathlib import Path
@@ -17,6 +17,7 @@ from .nightly import MAIN_DLL, MARKER, MARKER_KEYS, SCALER
 DLSS = "HelixSR/helixsr.dll"
 FSR4 = "OptiScaler/amd_fidelityfx_upscaler_dx12.dll"
 VERSION = "VERSION"
+PRESET_K = "HelixSR/k/helixsr.dll"  # Preset K for HLX DLSS, when the build has it (HelixSR 3.2 and later)
 MIN_SIZE = 1 << 20  # a DLL with its network or shaders is tens of MB
 
 

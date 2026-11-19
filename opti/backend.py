@@ -53,11 +53,18 @@ _thread = None  # the download's, while it runs
 TEARDOWN_WAIT = 8  # of the core's 10 s for teardown
 # HelixSR's build: the script that downloads and builds it, and how long it may take.
 HELIXSR_SCRIPT = Path(__file__).resolve().parent / "bin" / "helixsr-fetch.sh"
-HELIXSR_TIMEOUT = 3600  # it also downloads AMD's ~420 MB driver package
-HELIXSR_RELEASE_API = "https://api.github.com/repos/lonewolf0622/HelixSR/releases/latest"  # the stable one
+HELIXSR_TIMEOUT = 3600  # the shaders of HLX DLSS's network are compiled on this device
+HELIXSR_TIMEOUT_K = 4 * 3600  # Preset K's shaders take much longer
+# Which release the build takes (the script picks the same one): the latest stable, or the newest of all
+# (prereleases included, which /releases/latest skips).
+HELIXSR_CHANNELS = ("stable", "prerelease")
+HELIXSR_API = {
+    "stable": "https://api.github.com/repos/lonewolf0622/HelixSR/releases/latest",
+    "prerelease": "https://api.github.com/repos/lonewolf0622/HelixSR/releases?per_page=10",
+}
 HELIXSR_CHECK_TTL = 3600  # seconds a found tag is reused; a failed check is retried after HELIXSR_CHECK_RETRY
 HELIXSR_CHECK_RETRY = 120
-_latest_cache = {"at": 0.0, "ttl": 0, "tag": None}
+_latest_cache = {c: {"at": 0.0, "ttl": 0, "tag": None} for c in HELIXSR_CHANNELS}  # per channel
 _latest_lock = threading.Lock()
 SUPPORTS_TTL = 60  # seconds Steam's "yes, it can set launch options" is reused; a "no" is asked again after SUPPORTS_RETRY
 SUPPORTS_RETRY = 10
@@ -510,14 +517,14 @@ def _nvidia_job():
 
 # ---------- Background jobs ----------
 
-def _start(lock, target, name):
-    """Run target in a thread of its own while holding lock (target releases it); the thread, or None when
-    one already runs."""
+def _start(lock, target, name, *args):
+    """Run target(*args) in a thread of its own while holding lock (target releases it); the thread, or None
+    when one already runs."""
     if not lock.acquire(blocking=False):
         return None
     _stop.clear()
     try:
-        thread = threading.Thread(target=target, name=name, daemon=True)
+        thread = threading.Thread(target=target, args=args, name=name, daemon=True)
         thread.start()
     except BaseException:
         lock.release()
@@ -591,49 +598,82 @@ def _helixsr_dir():
 
 # Lines of the script that move the task on: (start of the line, fraction, text).
 HELIXSR_STAGES = (
-    ("looking", 0.05, "Looking for the latest stable version"),
+    ("looking", 0.05, "Looking for the latest version"),
     ("version:", 0.10, "Version found"),
     ("downloading", 0.20, "Downloading"),
     ("building", None, "Building (it can take several minutes)"),
 )
 
 
-# The slots of the DLLs the script leaves next to HelixSR Scaler when HelixSR's setup got them.
-KEPT_FROM_BUILD = ("amdxcffx64", "nvngx_dlss")
+# The slots of the DLLs the script leaves next to HelixSR Scaler (NVIDIA's DLSS DLL; HelixSR 3.2 ships HLX FSR 4
+# built, so there's no AMD file to keep).
+KEPT_FROM_BUILD = ("nvngx_dlss",)
 SAY = "[helixsr-fetch] "  # how the script's own lines start
 DIE = SAY + "error: "  # and the one it dies with
 
 
-def _helixsr_stage(line):
-    """(fraction, text) for a line of the script that starts a stage, else None."""
+def _helixsr_stage(line, preset_k=False):
+    """(fraction, text) for a line of the script that starts a stage, else None. The build says it takes much
+    longer when it includes Preset K."""
     if not line.startswith(SAY):
         return None
     rest = line[len(SAY):]
     for key, fraction, text in HELIXSR_STAGES:
         if rest.startswith(key):
-            return fraction, text
+            return fraction, text.replace("several minutes", "much longer with Preset K") if preset_k else text
     return None
 
 
 def helixsr_status():
-    """{"installed": the kept build (see nightly.read_marker) or None, "busy", "error"}: whether a build runs,
-    and why the last one failed (or None)."""
-    return {"installed": nightly.read_marker(_helixsr_dir()), "busy": _helix.locked(), "error": _helix_error}
+    """{"installed": the kept build (see nightly.read_marker) or None, "preset_k": it has Preset K, "busy",
+    "error"}: whether a build runs, and why the last one failed (or None)."""
+    return {
+        "installed": nightly.read_marker(_helixsr_dir()),
+        "preset_k": (_helixsr_dir() / helixsr.PRESET_K).is_file(),
+        "busy": _helix.locked(),
+        "error": _helix_error,
+    }
 
 
-def _helixsr_latest():
-    """Tag of the latest stable HelixSR release, or None (offline, rate limit, odd answer). Cached in memory."""
+def _setting(key, default):
+    """One of the module's settings (module.json), or default when they can't be read."""
+    try:
+        return ctx.settings.get(key)
+    except (ctx.Unavailable, ctx.InvalidArgument, KeyError) as e:
+        ctx.log.info("can't read the setting %s: %s", key, e)
+        return default
+
+
+def _channel(channel=None):
+    """The channel asked for, or the one chosen in the settings; InvalidArgument when it isn't one."""
+    if channel is None:
+        channel = _setting("helixsr_channel", HELIXSR_CHANNELS[0])
+    if channel not in HELIXSR_CHANNELS:
+        raise ctx.InvalidArgument(f"channel must be one of {', '.join(HELIXSR_CHANNELS)}")
+    return channel
+
+
+def _release_tag(answer):
+    """The tag of the release an answer of HELIXSR_API describes (a release, or a list of them newest first,
+    where a draft doesn't count), or None."""
+    if isinstance(answer, list):
+        answer = next((r for r in answer if isinstance(r, dict) and not r.get("draft")), None)
+    tag = answer.get("tag_name") if isinstance(answer, dict) and not answer.get("draft") else None
+    return tag if isinstance(tag, str) and tag else None
+
+
+def _helixsr_latest(channel):
+    """Tag of the latest HelixSR release of a channel (stable, or the newest of all), or None (offline, rate
+    limit, odd answer). Cached in memory, per channel."""
     with _latest_lock:
-        cache = _latest_cache
+        cache = _latest_cache[channel]
         if time.monotonic() - cache["at"] < cache["ttl"]:
             return cache["tag"]
         tag = None
         try:
-            answer = ctx.http.get_json(HELIXSR_RELEASE_API)
-            tag = answer.get("tag_name") if isinstance(answer, dict) else None
-            tag = tag if isinstance(tag, str) and tag else None
+            tag = _release_tag(ctx.http.get_json(HELIXSR_API[channel]))
         except (ctx.Unavailable, ctx.InvalidArgument) as e:
-            ctx.log.info("can't check the latest HelixSR: %s", e)
+            ctx.log.info("can't check the latest HelixSR (%s): %s", channel, e)
         cache.update(at=time.monotonic(), ttl=HELIXSR_CHECK_TTL if tag else HELIXSR_CHECK_RETRY, tag=tag)
         return tag
 
@@ -648,32 +688,39 @@ def _version_key(version):
     return tuple(nums)
 
 
-def helixsr_check():
-    """{"installed": the kept build's version (or None), "latest": the latest stable tag (None when unknown),
-    "update": the kept build is older}. Asks GitHub (cached), so it's apart from helixsr_status."""
+def helixsr_check(channel=None):
+    """{"installed": the kept build's version (or None), "latest": the latest tag of the channel (None when
+    unknown), "update": the kept build is older}. The channel is the one given, else the setting. Asks GitHub
+    (cached), so it's apart from helixsr_status."""
     installed = (nightly.read_marker(_helixsr_dir()) or {}).get("version")
-    latest = _helixsr_latest()
+    latest = _helixsr_latest(_channel(channel))
     have, newest = _version_key(installed), _version_key(latest)
     return {"installed": installed, "latest": latest, "update": have is not None and newest is not None and have < newest}
 
 
-def helixsr_build():
-    """Start downloading and building the latest stable HelixSR into HELIXSR_NAME; {"started", "busy"}.
-    helixsr_status tells how it went."""
+def helixsr_build(preset_k=None, channel=None):
+    """Start downloading and building HelixSR into HELIXSR_NAME: the latest stable one, or the newest of all
+    (channel), with Preset K too or not (it takes much longer); both are the module's settings unless given.
+    {"started", "busy"}. helixsr_status tells how it went."""
     global _helix_thread
+    if preset_k is None:
+        preset_k = _setting("helixsr_preset_k", False)
+    if not isinstance(preset_k, bool):
+        raise ctx.InvalidArgument("preset_k must be true or false")
+    channel = _channel(channel)
     if not HELIXSR_SCRIPT.is_file():
         raise ctx.Unavailable(f"build script not found: {HELIXSR_SCRIPT}")
     # Heavy (download and build): not while a game is running.
     if ctx.game.running:
         raise ctx.Unavailable("a game is running: close it to build HelixSR")
-    thread = _start(_helix, _helixsr_job, "opti-helixsr")
+    thread = _start(_helix, _helixsr_job, "opti-helixsr", preset_k, channel)
     if thread is None:
         return {"started": False, "busy": True}
     _helix_thread = thread
     return {"started": True, "busy": False}
 
 
-def _helixsr_job():
+def _helixsr_job(preset_k, channel):
     global _helix_error
     work = None
     try:
@@ -683,7 +730,7 @@ def _helixsr_job():
         try:
             GLOBAL_DIR.mkdir(parents=True, exist_ok=True)
             work = Path(tempfile.mkdtemp(dir=GLOBAL_DIR, prefix=".helixsr-build."))
-            _helixsr_run(work, progress)
+            _helixsr_run(work, progress, preset_k, channel)
             _keep_dlls(work / "out")
             with _build:
                 if _stop.is_set():  # the module was unloaded meanwhile: leave things as they are
@@ -711,7 +758,7 @@ def _helixsr_job():
 
 
 def _keep_dlls(out):
-    """AMD's and NVIDIA's DLLs the build used (the script leaves them next to HelixSR Scaler, out of its tree): each
+    """NVIDIA's DLL the build used (the script leaves it next to HelixSR Scaler, out of its tree): each
     kept in its slot when that has none yet (one the user chose stays), then taken out of out. Not keeping one
     fails nothing."""
     for slot in KEPT_FROM_BUILD:
@@ -731,16 +778,17 @@ def _keep_dlls(out):
             path.unlink(missing_ok=True)
 
 
-def _helixsr_run(work, progress):
+def _helixsr_run(work, progress, preset_k=False, channel="stable"):
     """Run the script in work (its result in work/out); a files.Error says why it failed."""
     global _helix_proc
     # Its temporary folder goes in work too: on disk, not in a /tmp that may be RAM, and removed with work
     # even when the script is killed (its own cleanup doesn't run then).
     (work / "tmp").mkdir()
     env = dict(os.environ, TMPDIR=str(work / "tmp"))
-    # No shell; --yes accepts the downloads of NVIDIA's DLL and AMD's package (the UI's confirmation is the user's).
+    # No shell; --yes accepts the download of NVIDIA's DLL (the UI's confirmation is the user's).
     _helix_proc = proc = subprocess.Popen(
-        ["bash", str(HELIXSR_SCRIPT), "--yes", "--out", str(work / "out")],
+        ["bash", str(HELIXSR_SCRIPT), "--yes", "--channel", channel, *(["--preset-k"] if preset_k else []),
+         "--out", str(work / "out")],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
         env=env, start_new_session=True,
     )
@@ -752,14 +800,14 @@ def _helixsr_run(work, progress):
         timed_out.set()
         _kill_build()
 
-    timer = threading.Timer(HELIXSR_TIMEOUT, expire)
+    timer = threading.Timer(HELIXSR_TIMEOUT_K if preset_k else HELIXSR_TIMEOUT, expire)
     timer.start()
     tail = collections.deque(maxlen=40)
     try:
         for line in proc.stdout:
             line = line.rstrip()
             tail.append(line)
-            stage = _helixsr_stage(line)
+            stage = _helixsr_stage(line, preset_k)
             if stage:
                 progress(*stage)
         proc.wait()

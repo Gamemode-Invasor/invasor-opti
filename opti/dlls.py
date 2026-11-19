@@ -1,6 +1,6 @@
 """DLLs the user brings, which the module can't ship: AMD's FSR 4 driver files (DirectX 12 and Vulkan) and NVIDIA's
-DLSS DLLs. Compiling HelixSR also keeps amdxcffx64.dll and nvngx_dlss.dll, the two its setup downloads, when their
-slots are empty.
+DLSS DLLs. Compiling HelixSR also keeps nvngx_dlss.dll, the one its setup downloads, when its slot is empty (HelixSR
+3.2 ships HLX FSR 4 built: there's no AMD file to keep).
 
 The module keeps a copy of each in its own folder (one sub-folder per slot, with INFO saying what the file is), so a
 game doesn't depend on where the original was. Turned on for a game, it's copied into its OptiScaler folder
