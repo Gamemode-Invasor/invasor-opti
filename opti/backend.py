@@ -6,8 +6,9 @@ only what this module needs set (INSTALL_INI, SCALER_INI).
 
 In GLOBAL_DIR, NIGHTLY_NAME holds the latest OptiScaler nightly, downloaded on request
 in a thread of its own (see nightly.py), HELIXSR_NAME HelixSR Scaler with HelixSR's upscalers, built on
-this device by bin/helixsr-fetch.sh (also in a thread of its own, see helixsr.py), and DLLS_NAME AMD's and
-NVIDIA's DLLs (see dlls.py). install.py puts either OptiScaler in a game, dlls.py the DLLs.
+this device by bin/helixsr-fetch.sh (also in a thread of its own, see helixsr.py), DLLS_NAME AMD's and
+NVIDIA's DLLs (see dlls.py), and ANR_NAME ANR FG, a frame generation provider for OptiScaler (downloaded in a thread of
+its own, see anr.py). install.py puts either OptiScaler in a game, dlls.py the DLLs, anr.py ANR FG.
 
 A file is the only source of truth: every call reads it again, and a change rewrites just the
 line of that key (comments, order and line ends stay as they are), atomically, and only if no
@@ -24,7 +25,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import dlls, files, helixsr, ini, install, nightly
+from . import anr, dlls, files, helixsr, ini, install, nightly
 
 ASSETS = Path(__file__).resolve().parent / "assets"
 # OptiScaler's own file (v10.0.0-pre1): a build's when it has none, and its defaults when none is downloaded.
@@ -41,6 +42,7 @@ INSTALL_INI = (("Libraries", "OptiDllPath", r"c:\windows\system32\umu\OptiScaler
 SCALER_INI = (("Libraries", "FfxDx12SRPath", r"C:\windows\system32\umu\OptiScaler\amd_fidelityfx_upscaler_dx12.dll"),)
 DLLS_NAME = "dlls"
 OLD_DLLS_NAME = "custom"  # its name in 0.3.0
+ANR_NAME = "anr"
 MAX_BYTES = 4 * 1024 * 1024  # OptiScaler's own is ~60 KB: anything this big isn't one
 
 ctx = None
@@ -77,6 +79,14 @@ _helix = threading.Lock()  # held while a build runs
 _helix_error = None  # why the last build failed, for the UI
 _helix_thread = None  # the build's, while it runs
 _helix_proc = None  # the script, while it runs
+_anr = threading.Lock()  # held while ANR FG downloads
+_anr_files = threading.Lock()  # held while the kept ANR FG is copied into a game, or replaced by a new one
+_anr_error = None  # why the last download failed, for the UI
+_anr_thread = None
+ANR_CHECK_TTL = 3600  # seconds a found release is reused; a failed check is retried after ANR_CHECK_RETRY
+ANR_CHECK_RETRY = 120
+_anr_latest_cache = {"at": 0.0, "ttl": 0, "release": None}
+_anr_latest_lock = threading.Lock()
 
 
 def setup(context):
@@ -274,7 +284,8 @@ def load(appid):
       "can_apply" (whether game_apply_launch can write them); None without a prefix;
     - "build": the nightly Global has downloaded (nightly.read_marker), or None;
     - "helixsr": the HelixSR Scaler Global has built, the same way, or None;
-    - "dlls": {slot: kept in Global}."""
+    - "dlls": {slot: kept in Global};
+    - "anr": ANR FG kept in Global (anr.status), or None; the game's own is "install"'s "anr" (anr.game_state)."""
     appid = _appid(appid)
     path = _ini_path(appid)
     if path is None:
@@ -286,7 +297,7 @@ def load(appid):
         for sec in r["sections"]:
             for k in sec["keys"]:
                 k["default"] = defaults.get((sec["name"], k["key"]))  # None: OptiScaler's file hasn't the key
-        r["install"] = {**state, "extras": dlls.game_state(path.parent)}
+        r["install"] = {**state, "extras": dlls.game_state(path.parent), "anr": anr.game_state(path.parent, _anr_dir())}
         dll = r["install"]["dll"]
         options = _launch_options(appid) if dll else None
         # Whether the launch options load OptiScaler as that DLL; None when there's nothing to tell.
@@ -296,6 +307,7 @@ def load(appid):
     r["build"] = nightly.read_marker(_nightly_dir())
     r["helixsr"] = nightly.read_marker(_helixsr_dir())
     r["dlls"] = {slot: kept is not None for slot, kept in dlls.status(_dlls_dir()).items()}
+    r["anr"] = anr.status(_anr_dir())
     return r
 
 
@@ -425,6 +437,17 @@ def game_extra(appid, slot, on):
     return _in_game(appid, f"turn {slot} off", lambda umu: dlls.disable(umu, slot))
 
 
+def game_anr(appid, on):
+    """Put ANR FG (the copy kept in Global) in the game's OptiScaler/custom, again when it's there already (an
+    update), or take it out. OptiScaler.ini isn't touched: FGNvngxReplacement is the user's to pick."""
+    if not isinstance(on, bool):
+        raise ctx.InvalidArgument("on must be true or false")
+    with _anr_files:
+        if on:
+            return _in_game(appid, "put ANR FG in", lambda umu: anr.enable(_anr_dir(), umu, ctx.archive.swap_dir))
+        return _in_game(appid, "take ANR FG out", anr.disable)
+
+
 # ---------- Global ----------
 
 def _dlls_dir():
@@ -513,6 +536,92 @@ def _nvidia_job():
             task.done(f"NVIDIA's DLSS {dlls.NVIDIA_RELEASE} DLLs kept")
     finally:
         _nvidia.release()
+
+
+# ---------- ANR FG ----------
+
+def _anr_dir():
+    return GLOBAL_DIR / ANR_NAME
+
+
+def anr_status():
+    """{"installed": the kept ANR FG (anr.status) or None, "busy", "error"}: whether a download runs, and why the
+    last one failed (or None)."""
+    return {"installed": anr.status(_anr_dir()), "busy": _anr.locked(), "error": _anr_error}
+
+
+def _anr_latest():
+    """The newest ANR FG release (anr.pick), or None (offline, rate limit, odd answer). Cached in memory."""
+    with _anr_latest_lock:
+        cache = _anr_latest_cache
+        if time.monotonic() - cache["at"] < cache["ttl"]:
+            return cache["release"]
+        release = None
+        try:
+            release = anr.latest(ctx.http)
+        except (ctx.Unavailable, ctx.InvalidArgument, files.Error) as e:
+            ctx.log.info("can't check the latest ANR FG: %s", e)
+        cache.update(at=time.monotonic(), ttl=ANR_CHECK_TTL if release else ANR_CHECK_RETRY, release=release)
+        return release
+
+
+def anr_check():
+    """{"installed": the kept copy's version (or None), "latest": the newest release's (None when unknown),
+    "update": they differ, and the kept one isn't the newer}. Asks GitHub (cached), so it's apart from anr_status."""
+    installed = (anr.status(_anr_dir()) or {}).get("version")
+    latest = (_anr_latest() or {}).get("version")
+    have, newest = _version_key(installed), _version_key(latest)
+    older = have is not None and newest is not None and newest < have
+    return {"installed": installed, "latest": latest, "update": bool(installed and latest and installed != latest and not older)}
+
+
+def anr_download():
+    """Start getting the latest ANR FG into ANR_NAME (anr.update); {"started", "busy"}. anr_status tells how it went."""
+    global _anr_thread
+    thread = _start(_anr, _anr_job, "opti-anr")
+    if thread is None:
+        return {"started": False, "busy": True}
+    _anr_thread = thread
+    return {"started": True, "busy": False}
+
+
+def _anr_job():
+    global _anr_error
+    try:
+        _anr_error = None
+        task = _task("ANR FG")
+        try:
+            release, downloaded = anr.update(_anr_dir(), ctx.http, ctx.archive, task=task, stop=_stop, swap_lock=_anr_files)
+        except files.Error as e:
+            _anr_error = str(e)
+        except (ctx.Unavailable, ctx.InvalidArgument) as e:  # the download or the unpacking, said by the core
+            _anr_error = f"Download failed ({e})"
+        except Exception as e:  # never die silently: the UI shows it
+            ctx.log.exception("ANR FG download failed")
+            _anr_error = f"Download failed ({e})"
+        if _anr_error:
+            ctx.log.warning("anr: %s", _anr_error)
+            if task:
+                task.fail(_anr_error)
+            return
+        with _anr_latest_lock:  # what was just downloaded is the latest
+            _anr_latest_cache.update(at=time.monotonic(), ttl=ANR_CHECK_TTL, release=release)
+        text = f"Downloaded ANR FG {release['version']}" if downloaded else f"ANR FG {release['version']} is already the latest"
+        ctx.log.info("anr: %s", text)
+        if task:
+            task.done(text)
+    finally:
+        _anr.release()
+
+
+def anr_remove():
+    """The module's copy of ANR FG goes; games that have it keep theirs. Returns anr_status()."""
+    if _anr.locked():
+        raise ctx.Unavailable("ANR FG is downloading: wait for it to end")
+    with _anr_files:
+        _guarded("remove it", lambda: shutil.rmtree(_anr_dir()) if _anr_dir().is_dir() else None, ctx.Unavailable)
+    ctx.log.info("anr: removed")
+    return anr_status()
 
 
 # ---------- Background jobs ----------
@@ -844,14 +953,14 @@ def teardown():
     _stop.set()
     _kill_build()
     deadline = time.monotonic() + TEARDOWN_WAIT
-    for thread in (_thread, _helix_thread, _nvidia_thread):
+    for thread in (_thread, _helix_thread, _nvidia_thread, _anr_thread):
         if thread is not None:
             thread.join(max(0, deadline - time.monotonic()))
 
 
 def uninstall(context, purge):
-    """With purge, the downloaded nightly, HelixSR Scaler and the DLLs go too (the module's own data,
-    and anything else left in GLOBAL_DIR)."""
+    """With purge, the downloaded nightly, HelixSR Scaler, the DLLs and ANR FG go too (the module's own data,
+    and anything else left in GLOBAL_DIR). Games keep what they have (it goes with their OptiScaler folder)."""
     if purge:
         shutil.rmtree(GLOBAL_DIR, ignore_errors=True)
 
@@ -865,6 +974,7 @@ METHODS = {
     "game_set_dll": game_set_dll,
     "game_apply_launch": game_apply_launch,
     "game_extra": game_extra,
+    "game_anr": game_anr,
     "dlls_status": dlls_status,
     "dlls_set": dlls_set,
     "dlls_remove": dlls_remove,
@@ -875,4 +985,8 @@ METHODS = {
     "helixsr_status": helixsr_status,
     "helixsr_build": helixsr_build,
     "helixsr_check": helixsr_check,
+    "anr_status": anr_status,
+    "anr_check": anr_check,
+    "anr_download": anr_download,
+    "anr_remove": anr_remove,
 }

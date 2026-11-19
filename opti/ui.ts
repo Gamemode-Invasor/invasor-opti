@@ -3,7 +3,8 @@ import { currentGame, defineModule, ui, type ModuleCtx } from "invasor";
 // OptiScaler: the selected game's OptiScaler.ini, built from the file itself.
 // Game: that file, plus installing OptiScaler in the game (the nightly Global downloaded, or HelixSR
 // Scaler as Global compiled it) and the launch line to copy or apply. Global: the OptiScaler nightly the
-// module has downloaded (and a button to get the latest), HelixSR (a button to compile it) and the AMD/NVIDIA DLLs.
+// module has downloaded (and a button to get the latest), HelixSR (a button to compile it), ANR FG (a frame generation
+// provider for OptiScaler, downloaded) and the AMD/NVIDIA DLLs.
 // Credits last.
 // Everything sits in a folded "All Configuration" group (a switch hides the keys still at OptiScaler's
 // defaults), then one foldable group per [Section]
@@ -30,7 +31,18 @@ interface Loaded {
   build?: Build | null;
   helixsr?: Build | null;
   dlls?: Record<string, boolean>; // the DLL slots kept in Global
+  anr?: AnrKept | null; // ANR FG kept in Global
 }
+
+/** ANR FG as Global keeps it: the version its nr_fg_package.json says, and the release it came from. */
+interface AnrKept {
+  version: string | null;
+  tag: string | null;
+  date: string | null;
+}
+
+// ANR FG's folder, as OptiScaler's FGNvngxReplacement lists it (the backend's anr.NAME).
+const ANR_FOLDER = "Apex Neural Rendering FG";
 
 interface DllFile {
   name: string;
@@ -70,6 +82,7 @@ interface Install {
   dll: string | null;
   flavor: string | null; // "optiscaler" or "helixsr-scaler" (null: not installed)
   extras?: Record<string, boolean>;
+  anr?: { on: boolean; current: boolean | null }; // ANR FG in the game; current: it's Global's copy (null: off, or none in Global)
   launch_ok?: boolean | null; // the game's launch options load it as `dll` (null: nothing to tell)
   can_apply?: boolean; // "Apply to the game" can write them (Steam has the call)
 }
@@ -173,7 +186,7 @@ class IniPage {
 
   /** What tells one load from another, for changed(). */
   private sigFor(key: unknown, l: Loaded | null, problem: string | null) {
-    return sigOf(key, l?.state, l?.path, l?.mtime, problem, l?.install, l?.build, l?.helixsr);
+    return sigOf(key, l?.state, l?.path, l?.mtime, problem, l?.install, l?.build, l?.helixsr, l?.anr);
   }
 
   /** The file, or null when the page already shows it as it is now. */
@@ -463,9 +476,35 @@ function installation(ctx: ModuleCtx, key: unknown, loaded: Loaded): HTMLElement
       if (!on && !loaded.dlls?.[slot.id]) toggle.setDisabled(true, `Choose ${slot.file} in Global first (DLLs)`);
       children.push(toggle);
     }
+    children.push(...anrGame(ctx, appid, inst, loaded));
   }
   parts.push(foldable("Installation", children, installOpen, (open) => void (installOpen = open)));
   return parts;
+}
+
+/** ANR FG in the game: its switch, and an update when Global keeps another copy than the game's. */
+function anrGame(ctx: ModuleCtx, appid: string, inst: Install, loaded: Loaded): HTMLElement[] {
+  const on = !!inst.anr?.on;
+  const kept = loaded.anr ?? null;
+  const out: HTMLElement[] = [];
+  const toggle = ui.toggle({
+    label: "ANR FG",
+    value: on,
+    hint: `Apex Neural Rendering's frame generation (third-party, beta). Copies its folder into the game's OptiScaler/custom; then pick "${ANR_FOLDER}" as FGNvngxReplacement in OptiScaler's own menu`,
+    onChange: (v) => void gameAction(ctx, "game_anr", { appid, on: v }, `ANR FG: ${v ? "on" : "off"}`),
+  });
+  if (!on && !kept) toggle.setDisabled(true, "Download ANR FG in Global first");
+  out.push(toggle);
+  if (on && kept && inst.anr?.current === false) {
+    out.push(
+      ui.button({
+        label: `Update ANR FG to ${kept.version ?? kept.tag ?? "Global's"}`,
+        hint: "The copy kept in Global replaces the game's ANR FG folder whole (its nr_fg.ini too)",
+        onClick: () => void gameAction(ctx, "game_anr", { appid, on: true }, "ANR FG updated"),
+      }),
+    );
+  }
+  return out;
 }
 
 async function applyLaunch(ctx: ModuleCtx, appid: string) {
@@ -972,15 +1011,181 @@ class DllsBox {
 
 const dllsBox = new DllsBox();
 
-// The Global tab's element: its three groups, built once per panel (they keep themselves up to date).
+/** anr_status: ANR FG kept in Global, whether a download runs, why the last one failed. */
+interface AnrStatus {
+  installed: AnrKept | null;
+  busy: boolean;
+  error: string | null;
+}
+
+/** anr_check: the kept version, the newest release's (null: unknown) and whether they differ. */
+interface AnrCheck {
+  installed: string | null;
+  latest: string | null;
+  update: boolean;
+}
+
+const ANR_LABEL = "Download ANR FG";
+
+/**
+ * The "ANR FG" group in Global, under HelixSR: the ANR FG kept (Apex Neural Rendering's frame generation, a provider
+ * for OptiScaler), the newest release on GitHub, a button to download it (the download runs in the backend, followed
+ * until it ends) and Remove. Built once per panel.
+ */
+class AnrBox {
+  el: HTMLElement | null = null;
+  private open = false;
+  private version: HTMLElement | null = null;
+  private latest: HTMLElement | null = null;
+  private problem: HTMLElement | null = null;
+  private button: ReturnType<typeof ui.button> | null = null;
+  private remove: ReturnType<typeof ui.button> | null = null;
+  private installed: AnrKept | null = null;
+  private check: AnrCheck | null = null;
+  private error: string | null = null;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private busy = false;
+
+  element(ctx: ModuleCtx) {
+    if (this.el) return this.el;
+    this.version = ui.info("Looking for the downloaded version…");
+    this.latest = ui.info("");
+    this.latest.hidden = true;
+    this.button = ui.button({
+      label: ANR_LABEL,
+      hint: "The addon zip of the newest release on github.com/apex-compute/ANR, checked against its SHA256SUMS.txt, into this module's files",
+      onClick: () => void this.download(ctx),
+    });
+    this.remove = ui.button({
+      label: "Remove ANR FG",
+      hint: "The module's copy goes; games that have it keep theirs",
+      onClick: () => void this.removeKept(ctx),
+    });
+    this.problem = ui.info("");
+    this.problem.hidden = true;
+    const about = ui.info(
+      `Apex Neural Rendering's frame generation: a third-party beta, downloaded from its GitHub releases. Turned on in a game, it shows in OptiScaler's own menu as "${ANR_FOLDER}" (FGNvngxReplacement): pick it there.`,
+    );
+    this.el = foldable("ANR FG", [about, this.version, this.latest, this.button, this.remove, this.problem], this.open, (open) => void (this.open = open));
+    this.show(this.busy, this.error);
+    return this.el;
+  }
+
+  reset() {
+    clearTimeout(this.timer);
+    this.el = this.version = this.latest = this.problem = this.button = this.remove = null;
+    this.installed = this.check = this.error = null;
+    this.open = false;
+    this.busy = false;
+  }
+
+  refresh(ctx: ModuleCtx) {
+    void this.refreshStatus(ctx);
+    void this.refreshCheck(ctx);
+  }
+
+  /** Is there a newer ANR FG? The backend asks GitHub at most once an hour; offline, the button just downloads. */
+  private async refreshCheck(ctx: ModuleCtx) {
+    try {
+      this.check = await ctx.call<AnrCheck>("anr_check");
+    } catch {
+      this.check = null;
+    }
+    this.show(this.busy, this.error);
+  }
+
+  private async refreshStatus(ctx: ModuleCtx) {
+    clearTimeout(this.timer);
+    let s: AnrStatus;
+    try {
+      s = await ctx.call<AnrStatus>("anr_status");
+    } catch (e) {
+      this.show(false, errorText(e));
+      return;
+    }
+    const finished = this.busy && !s.busy;
+    this.installed = s.installed;
+    this.show(s.busy, s.error);
+    if (finished) {
+      ctx.toast(s.error ? `ANR FG: ${s.error}` : `ANR FG ${s.installed?.version ?? ""}`, s.error ? "error" : "ok");
+      if (!s.error) {
+        void this.refreshCheck(ctx);
+        void renderGame(ctx, true); // its switch depends on it
+      }
+    }
+    if (s.busy) this.timer = setTimeout(() => void this.refreshStatus(ctx), POLL);
+  }
+
+  private show(busy: boolean, error: string | null) {
+    this.busy = busy;
+    this.error = error;
+    if (!this.version || !this.latest || !this.problem || !this.button || !this.remove) return;
+    const kept = this.installed;
+    this.version.textContent = kept ? `Downloaded: ANR FG ${kept.version ?? kept.tag ?? "(version unknown)"}` : "No ANR FG downloaded yet.";
+    const c = this.check;
+    let label = ANR_LABEL;
+    let line = "";
+    if (c?.latest) {
+      if (!kept) line = `Latest: ${c.latest}`;
+      else if (c.update) {
+        label = `Update to ${c.latest}`;
+        line = `ANR FG ${c.latest} is out`;
+      } else line = `Up to date: ${c.latest} is the latest`;
+    }
+    this.latest.textContent = line;
+    this.latest.hidden = !line || busy;
+    this.problem.textContent = error ?? "";
+    this.problem.hidden = !error || busy;
+    this.button.setLabel(busy ? "Downloading…" : label);
+    this.button.setDisabled(busy, busy ? "Downloading: see the Tasks panel (Select)" : undefined);
+    this.remove.style.display = kept ? "" : "none";
+    this.remove.setDisabled(busy, busy ? "Downloading: see the Tasks panel (Select)" : undefined);
+  }
+
+  private async download(ctx: ModuleCtx) {
+    const ok = await ui.confirm(
+      "Download the newest ANR FG (Apex Neural Rendering's frame generation, a third-party beta) from github.com/apex-compute/ANR? Only its addon zip (a few MB), checked against the release's SHA256SUMS.txt. It replaces the module's copy; games that have it keep theirs until you update them.",
+      { ok: "Download" },
+    );
+    if (!ok) return;
+    try {
+      const r = await ctx.call<{ started: boolean; busy: boolean }>("anr_download");
+      if (r.started) {
+        this.busy = true;
+        ctx.toast("Downloading ANR FG");
+      }
+    } catch (e) {
+      ctx.toast(errorText(e), "error");
+    }
+    void this.refreshStatus(ctx);
+  }
+
+  private async removeKept(ctx: ModuleCtx) {
+    if (!(await ui.confirm("Remove the module's copy of ANR FG? Games that have it keep theirs.", { ok: "Remove" }))) return;
+    try {
+      const s = await ctx.call<AnrStatus>("anr_remove");
+      this.installed = s.installed;
+      this.show(s.busy, s.error);
+      void this.refreshCheck(ctx);
+      void renderGame(ctx, true);
+    } catch (e) {
+      ctx.toast(errorText(e), "error");
+    }
+  }
+}
+
+const anrBox = new AnrBox();
+
+// The Global tab's element: its four groups, built once per panel (they keep themselves up to date).
 let globalEl: HTMLElement | null = null;
 
 function renderGlobal(ctx: ModuleCtx) {
   if (!globalEl || globalEl.childElementCount) return;
   globalEl.replaceChildren(
-    ui.info("What the games get: the OptiScaler nightly, HelixSR Scaler and AMD/NVIDIA DLLs. Each game's OptiScaler.ini is set in Game."),
+    ui.info("What the games get: the OptiScaler nightly, HelixSR Scaler, ANR FG and AMD/NVIDIA DLLs. Each game's OptiScaler.ini is set in Game."),
     nightlyBox.element(ctx),
     helixBox.element(ctx),
+    anrBox.element(ctx),
     dllsBox.element(ctx),
   );
 }
@@ -1006,6 +1211,7 @@ export default defineModule({
         void dllsBox.refresh(ctx); // its rows are made by renderGlobal
         void nightlyBox.refresh(ctx);
         helixBox.refresh(ctx);
+        anrBox.refresh(ctx);
       },
     },
     {
@@ -1014,9 +1220,9 @@ export default defineModule({
         el.append(
           ui.info("Author: FranjeGueje"),
           ui.separator(),
-          ui.info("Thanks to OptiScaler (github.com/optiscaler/OptiScaler) and every one of its contributors, and to HelixSR (github.com/lonewolf0622/HelixSR). Each keeps its own license."),
+          ui.info("Thanks to OptiScaler (github.com/optiscaler/OptiScaler) and every one of its contributors, to HelixSR (github.com/lonewolf0622/HelixSR) and to Apex Neural Rendering (github.com/apex-compute/ANR, ANR FG). Each keeps its own license."),
           ui.separator(),
-          ui.info("OptiHLX is not affiliated with OptiScaler or HelixSR. Please don't report problems with this module to them."),
+          ui.info("OptiHLX is not affiliated with OptiScaler, HelixSR or Apex Neural Rendering. Please don't report problems with this module to them."),
         );
       },
     },
@@ -1029,6 +1235,7 @@ export default defineModule({
     installOpen = false;
     nightlyBox.reset();
     helixBox.reset();
+    anrBox.reset();
     dllsBox.reset();
     lastFolder = undefined;
   },

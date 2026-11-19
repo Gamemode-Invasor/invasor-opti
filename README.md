@@ -1,11 +1,11 @@
 # OptiHLX
 
-OptiHLX is an [Invasor](https://github.com/Gamemode-Invasor/invasor) module that installs [OptiScaler](https://github.com/optiscaler/OptiScaler) in your games from the panel. It installs either the latest OptiScaler nightly or **HelixSR Scaler**: OptiScaler with [HelixSR](https://github.com/lonewolf0622/HelixSR)'s two upscalers, HLX DLSS and HLX FSR 4, which the module compiles on your device. With either, it can add AMD's FSR 4 driver DLLs and NVIDIA's DLSS DLLs, and it edits the game's `OptiScaler.ini`.
+OptiHLX is an [Invasor](https://github.com/Gamemode-Invasor/invasor) module that installs [OptiScaler](https://github.com/optiscaler/OptiScaler) in your games from the panel. It installs either the latest OptiScaler nightly or **HelixSR Scaler**: OptiScaler with [HelixSR](https://github.com/lonewolf0622/HelixSR)'s two upscalers, HLX DLSS and HLX FSR 4, which the module compiles on your device. With either, it can add AMD's FSR 4 driver DLLs, NVIDIA's DLSS DLLs and [ANR FG](https://github.com/apex-compute/ANR) (Apex Neural Rendering's frame generation, a third-party beta), and it edits the game's `OptiScaler.ini`.
 
 It lives in the library's Invasor panel only, not in Quick Access: there's nothing to do with it during a game. Three sub-tabs (L2/R2):
 
 - **Game**: OptiScaler in the selected game, and its file.
-- **Global**: what the games get, in three groups.
+- **Global**: what the games get, in four groups.
 
   The **OptiScaler** group shows the OptiScaler build the module has downloaded, and **Download the latest nightly** gets the newest build of [OptiScaler-nightly](https://github.com/optiscaler/OptiScaler-nightly/releases) (it shows in the Tasks panel). The `.7z` is checked against GitHub's checksum and unpacked as it is into `~/.local/share/invasor-opti/optiscaler/`, with `.invasor-opti.version` saying which build it is; the old build is replaced only once the new one is complete, and a build with a symbolic link in it is refused. Unpacking needs `bsdtar` (part of SteamOS).
 
@@ -17,6 +17,11 @@ It lives in the library's Invasor panel only, not in Quick Access: there's nothi
   - It runs as a task in the Tasks panel (several minutes, not while a game is running) and needs `curl`, `unzip` and a Proton in Steam (in `steamapps/common` or `compatibilitytools.d`), which HelixSR's setup uses for its shader compilers, plus Python 3 with numpy (or the setup downloads a portable one).
   - The module asks GitHub for the latest tag of the chosen version (at most once an hour once it has an answer; a failed check is retried after 2 minutes) and compares it with the compiled one: the button then reads **Update to v…** when there's a newer one, or **Recompile** when it's up to date.
 
+  Under HelixSR, the **ANR FG** group keeps [ANR FG](https://github.com/apex-compute/ANR), Apex Neural Rendering's frame generation: a frame generation provider for OptiScaler. **It's a third-party beta binary**, downloaded from its GitHub releases; OptiHLX doesn't make it and isn't affiliated with it.
+  - It shows the version kept (what its `nr_fg_package.json` says, such as `V.B20`) and the newest release on GitHub (the module asks at most once an hour once it has an answer; a failed check is retried after 2 minutes). **Download ANR FG** (after asking; **Update to V.B…** when there's a newer one) gets the newest release's **addon** zip (`anr-fg-<version>-addon.zip`, a few MB, for an OptiScaler that's already there; the `full` zip, which brings its own OptiScaler, isn't used). It shows in the Tasks panel.
+  - The release's `SHA256SUMS.txt` is downloaded checked against GitHub's checksum of it, and the zip against `SHA256SUMS.txt` (and GitHub's checksum of the zip, when there is one); the provider DLL must also be the one `nr_fg_package.json` names. Only the `Apex Neural Rendering FG` folder and `nr_fg_package.json` are unpacked, into `~/.local/share/invasor-opti/anr/` (with `.invasor-opti.version`); a path that would leave that folder, a symbolic link or an archive too big is refused, and the old copy is replaced only once the new one is complete. The zip's install scripts are never run.
+  - **Remove ANR FG** (after asking) removes the module's copy; games that have it keep theirs.
+
   Last, **DLLs (AMD/Nvidia)** keeps the DLLs the module can't ship, in two groups, **AMD** and **NVIDIA**, one line each with the version the file says it is:
   - **AMD FSR 4 (DirectX 12)**, `amdxcffx64.dll`, and **AMD FSR 4 (Vulkan)**, `amdvkffx64.dll` (INT8 RDNA2 and INT8 Lite in Vulkan games need it), from AMD's driver;
   - **NVIDIA DLSS**, `nvngx_dlss.dll`: games that use DLSS directly, without Streamline (Unreal Engine 4 games, for one), only offer DLSS on an AMD or Intel GPU when it's in OptiScaler's folder (their own copy isn't enough);
@@ -25,7 +30,7 @@ It lives in the library's Invasor panel only, not in Quick Access: there's nothi
   Each has its own **Choose <file>…**, always there, which opens Invasor's file picker (a big window that lists folders and `.dll` files; a `.dll` is picked by pressing it), and its own **Remove <name>** once it's kept; one never changes the others. At the bottom of NVIDIA, after a line, **Download NVIDIA's DLSS v310.7.0 DLLs** asks and then gets NVIDIA's three from NVIDIA's GitHub (the release HelixSR's setup uses, each checked against its SHA-256, about 107 MB; it shows in the Tasks panel). They replace the three kept only once all three are here: if one fails, nothing changes. There's no such button for AMD's, which only come in AMD's driver package. The module keeps a copy of each DLL in `~/.local/share/invasor-opti/dlls/`, so the original can move or be on a card that isn't there; games that have a DLL keep theirs when it's removed.
 
   Every group in Global (and AMD and NVIDIA inside DLLs) starts folded.
-- **Credits**: author, thanks to OptiScaler and HelixSR, and that OptiHLX isn't affiliated with either.
+- **Credits**: author, thanks to OptiScaler, HelixSR and Apex Neural Rendering (ANR FG), and that OptiHLX isn't affiliated with any of them.
 
 The game's file is read from its Proton prefix, `compatdata/<appid>/pfx/drive_c/windows/system32/umu/OptiScaler.ini`, the folder Wine's OptiScaler hack in GE-Proton and proton-cachyos loads OptiScaler from (with `WINE_OPTISCALER_NAME=dxgi.dll %command%` in the game's launch options).
 
@@ -40,6 +45,7 @@ Under the file's path, the Game tab installs OptiScaler in that folder:
   - **Uninstall** (after asking) removes `OptiScaler.dll`, `OptiScaler.ini`, the `OptiScaler` folder (and, for HelixSR Scaler, the `HelixSR` and `Licenses` folders), `.invasor-opti.version`, and every `dxgi.dll`, `d3d12.dll`, `dbghelp.dll` or `winmm.dll` that is a link to `OptiScaler.dll` or a copy of it. The folders go whole, with anything you added there (plugins, logs…); nothing else in `umu` is touched.
   - **DLL to load** (`dxgi`, `d3d12`, `dbghelp`, `winmm`): the name the game loads OptiScaler as. Changing it while OptiScaler is installed renames the link and changes the launch line. A DLL of that name that isn't OptiScaler is never replaced.
   - With either installed, a switch per DLL of **DLLs (AMD/Nvidia)** (enabled once it's kept in Global), such as **NVIDIA DLSS (nvngx_dlss.dll)**: on, it copies the DLL into the game's `OptiScaler` folder; off, it removes it.
+  - With either installed, an **ANR FG** switch (enabled once ANR FG is downloaded in Global; on for a game that already has it): on, it copies the `Apex Neural Rendering FG` folder kept in Global into the game's `OptiScaler/custom` folder (OptiScaler's folder of frame generation providers); off, it removes that folder only, and the rest of `custom` (HLX FSR 4 Full, say) stays. That's all it does: the module doesn't change `OptiScaler.ini` for it. OptiScaler then lists it as `Apex Neural Rendering FG` in **FGNvngxReplacement** ([FrameGen]): pick it in OptiScaler's own menu in the game (the module doesn't set it, and the list in the game's file below only has the values its comments name). When Global keeps another copy than the game's, **Update ANR FG to …** replaces the game's folder whole (its `nr_fg.ini` too). Uninstalling OptiScaler removes it with the `OptiScaler` folder.
 
 The game's file is shown from the options in it, so it follows whatever OptiScaler version is installed:
 
@@ -57,7 +63,7 @@ The game's file is shown from the options in it, so it follows whatever OptiScal
 </p>
 
 ## Requirements
-Invasor 0.3.0 or newer (`min_core`): it uses `ctx.http` to ask GitHub and download the nightly, `ctx.archive` to unpack it and swap folders, `ctx.paths` and `ctx.vdf` to find a game's prefix and read Steam's files, `ctx.steam` for the launch options, and `ctx.copy` and `ctx.pickPath` in the panel. `bsdtar` (part of SteamOS) unpacks the `.7z`.
+Invasor 0.3.0 or newer (`min_core`): it uses `ctx.http` to ask GitHub and download the nightly and ANR FG, `ctx.archive` to unpack them and swap folders, `ctx.paths` and `ctx.vdf` to find a game's prefix and read Steam's files, `ctx.steam` for the launch options, and `ctx.copy` and `ctx.pickPath` in the panel. `bsdtar` (part of SteamOS) unpacks the `.7z`.
 
 ## Build, test and install
 With the core checked out next to this repository (`../invasor`):
@@ -68,6 +74,9 @@ python3 ../invasor/tools/install_module.py opti    # or install that zip from �
 ```
 
 ## Changes
+
+### 0.4.0
+- ANR FG ([Apex Neural Rendering](https://github.com/apex-compute/ANR)'s frame generation, a third-party beta): a new **ANR FG** group in Global, under HelixSR, downloads the newest release's addon zip (checked against the release's `SHA256SUMS.txt`) and shows the version kept and the newest one; in Game, an **ANR FG** switch puts its `Apex Neural Rendering FG` folder in the game's `OptiScaler/custom`, where OptiScaler offers it in **FGNvngxReplacement** (pick it in OptiScaler's own menu: the module doesn't change `OptiScaler.ini`).
 
 ### 0.3.2
 - HelixSR 3.2 support. HLX FSR 4 now comes built in the release, so compiling no longer downloads AMD's driver package (about 420 MB) and takes a few minutes less; HelixSR Scaler also brings **HLX FSR 4 Full** (in `OptiScaler/custom`).
@@ -111,5 +120,5 @@ python3 ../invasor/tools/install_module.py opti    # or install that zip from �
 
 ### Third-party
 - `opti/assets/OptiScaler.optiscaler.ini` is OptiScaler's own file (v10.0.0-pre1, nightly 2026-10-23), used when a build has none: [OptiScaler](https://github.com/optiscaler/OptiScaler) is GPL-3.0.
-- No DLL is shipped with the module. OptiScaler is downloaded from its own nightly releases, which carry the licenses of what they include (FidelityFX, XeSS, DirectX) in their `Licenses` folder. AMD's and NVIDIA's DLLs are files you bring (or NVIDIA's DLSS DLL that HelixSR's build downloads, kept), and HelixSR is built on your machine with **Download and compile**: they're copied only on your machine. HelixSR Scaler comes with the HelixSR release (GPL-3.0, based on OptiScaler, [source](https://github.com/lonewolf0622/HelixSR-Scaler)); HelixSR's own DLLs have HelixSR's license. To build them, NVIDIA's DLSS DLL ([NVIDIA's license](https://github.com/NVIDIA/DLSS/blob/v310.7.0/LICENSE.txt)) is downloaded; the DLLs it makes carry data made from it, and they and the kept DLL are for your own device only. HLX FSR 4 comes built in the release, from AMD's FSR SDK files (MIT).
-- OptiHLX isn't affiliated with OptiScaler, HelixSR, NVIDIA or AMD: the name only says what it installs (OptiScaler, and HelixSR's HLX upscalers).
+- No DLL is shipped with the module. ANR FG is a third-party beta downloaded from [its GitHub releases](https://github.com/apex-compute/ANR/releases), under its own license, and only copied on your machine. OptiScaler is downloaded from its own nightly releases, which carry the licenses of what they include (FidelityFX, XeSS, DirectX) in their `Licenses` folder. AMD's and NVIDIA's DLLs are files you bring (or NVIDIA's DLSS DLL that HelixSR's build downloads, kept), and HelixSR is built on your machine with **Download and compile**: they're copied only on your machine. HelixSR Scaler comes with the HelixSR release (GPL-3.0, based on OptiScaler, [source](https://github.com/lonewolf0622/HelixSR-Scaler)); HelixSR's own DLLs have HelixSR's license. To build them, NVIDIA's DLSS DLL ([NVIDIA's license](https://github.com/NVIDIA/DLSS/blob/v310.7.0/LICENSE.txt)) is downloaded; the DLLs it makes carry data made from it, and they and the kept DLL are for your own device only. HLX FSR 4 comes built in the release, from AMD's FSR SDK files (MIT).
+- OptiHLX isn't affiliated with OptiScaler, HelixSR, Apex Neural Rendering, NVIDIA or AMD: the name only says what it installs (OptiScaler, and HelixSR's HLX upscalers).
